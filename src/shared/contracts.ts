@@ -42,9 +42,18 @@ export const MigrationResultSchema = z.object({
   counts: z.record(z.string(), z.number()),
 });
 
+export const MigrationPreviewSchema = z.object({
+  sourcePath: z.string(),
+  integrity: z.string(),
+  schemaVersion: z.number(),
+  counts: z.record(z.string(), z.number()),
+  warnings: z.array(z.string()),
+});
+
 export type JobStatus = z.infer<typeof JobStatusSchema>;
 export type ManualJobInput = z.infer<typeof ManualJobSchema>;
 export type MigrationResult = z.infer<typeof MigrationResultSchema>;
+export type MigrationPreview = z.infer<typeof MigrationPreviewSchema>;
 
 export interface JobRecord {
   id: string;
@@ -75,11 +84,43 @@ export interface DashboardData {
   statusCounts: Record<string, number>;
   databasePath: string;
   lastBackupPath: string | null;
+  schemaVersion: number;
+  pendingTasks: number;
 }
 
 export interface OperationResult {
   ok: boolean;
   message: string;
+}
+
+export interface RestoreResult {
+  restoredFrom: string;
+  safetyBackup: string;
+  counts: Record<string, number>;
+}
+
+export type TaskStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+
+export interface TaskRecord {
+  id: string;
+  type: string;
+  status: TaskStatus;
+  progress: number;
+  payload: Record<string, unknown>;
+  result: Record<string, unknown>;
+  error: string;
+  attempts: number;
+  idempotencyKey: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  heartbeatAt: string | null;
 }
 
 export interface JobWorkbenchApi {
@@ -89,7 +130,9 @@ export interface JobWorkbenchApi {
   updateJobStatus(input: { id: string; status: JobStatus }): Promise<JobRecord>;
   archiveJobs(ids: string[]): Promise<OperationResult>;
   restoreJobs(ids: string[]): Promise<OperationResult>;
-  chooseAndMigrate(): Promise<MigrationResult | null>;
+  inspectLegacyDatabase(): Promise<MigrationPreview | null>;
+  confirmLegacyMigration(): Promise<MigrationResult>;
+  chooseAndRestore(): Promise<RestoreResult | null>;
   createBackup(): Promise<string>;
   exportResumePdf(): Promise<string | null>;
 }

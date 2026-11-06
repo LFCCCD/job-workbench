@@ -15,6 +15,7 @@ import {
   ManualJobSchema,
   UpdateJobStatusSchema,
 } from "../shared/contracts";
+import type { MigrationPreview } from "../shared/contracts";
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const userDataRoot =
@@ -24,6 +25,7 @@ app.setPath("userData", userDataRoot);
 
 let mainWindow: BrowserWindow | null = null;
 let database: JobDatabase | null = null;
+let pendingMigration: MigrationPreview | null = null;
 
 function getDatabase(): JobDatabase {
   if (!database) {
@@ -101,7 +103,7 @@ function registerIpc() {
   ipcMain.handle("workbench:create-backup", async () => {
     return getDatabase().createBackup("manual");
   });
-  ipcMain.handle("workbench:migrate-database", async () => {
+  ipcMain.handle("workbench:inspect-legacy-database", async () => {
     if (!mainWindow) return null;
     const defaultDb = path.join(
       app.getPath("desktop"),
@@ -117,7 +119,43 @@ function registerIpc() {
       filters: [{ name: "SQLite Database", extensions: ["sqlite", "db"] }],
     });
     if (selection.canceled || !selection.filePaths[0]) return null;
-    return getDatabase().migrateLegacy(selection.filePaths[0]);
+    pendingMigration = getDatabase().inspectLegacyDatabase(
+      selection.filePaths[0],
+    );
+    return pendingMigration;
+  });
+  ipcMain.handle("workbench:confirm-migration", async () => {
+    if (!pendingMigration) throw new Error("没有待确认的迁移任务");
+    const preview = pendingMigration;
+    pendingMigration = null;
+    return getDatabase().migrateLegacy(preview.sourcePath);
+  });
+  ipcMain.handle("workbench:restore-backup", async () => {
+    if (!mainWindow) return null;
+    const database = getDatabase();
+    const selection = await dialog.showOpenDialog(mainWindow, {
+      title: "选择要恢复的 SQLite 备份",
+      defaultPath: database.backupDir,
+      properties: ["openFile"],
+      filters: [{ name: "SQLite Backup", extensions: ["sqlite", "db"] }],
+    });
+    if (selection.canceled || !selection.filePaths[0]) return null;
+    const preview = database.inspectLegacyDatabase(selection.filePaths[0]);
+    const summary = Object.entries(preview.counts)
+      .map(([table, count]) => `${table}: ${count}`)
+      .join("\n");
+    const confirmation = await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      title: "恢复数据库",
+      message: "恢复会覆盖当前数据，但系统会先自动创建安全备份。",
+      detail: summary,
+      buttons: ["取消", "确认恢复"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    if (confirmation.response !== 1) return null;
+    return database.restoreBackup(preview.sourcePath);
   });
   ipcMain.handle("workbench:export-resume", async () => {
     if (!mainWindow) return null;

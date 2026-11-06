@@ -5,8 +5,11 @@ Windows 本地求职管理工具。当前实现为 M1 垂直切片，已打通�
 - Electron 桌面外壳、React 界面和 Typed IPC
 - Electron 内置 `node:sqlite` 数据库
 - 旧版 SQLite 数据库迁移和安全备份
+- Schema 版本、完整性检查和迁移预览
 - 岗位手动新增、状态修改、批量归档与恢复
 - SQLite 一致性备份
+- 数据库恢复及恢复前自动安全备份
+- 持久化 Task 表和重启中断检测
 - 已验证简历事实导出 PDF
 - Windows NSIS 安装包
 
@@ -54,7 +57,7 @@ npm run dist
 ## 测试
 
 - `npm run check`：TypeScript 类型检查
-- `npm test`：SQLite、状态、归档、备份和迁移测试
+- `npm test`：SQLite、Schema、Task、状态、归档、备份、恢复和迁移测试
 - `node scripts/electron-smoke.cjs`：真实 Electron 流程测试
 
 ## 技术决策
@@ -62,3 +65,5 @@ npm run dist
 初始方案使用 `better-sqlite3`，但 M1 验证发现它要求在本机安装 Visual Studio C++ 工具链。
 Electron 45 自带 Node 24，其 `node:sqlite` 已通过读写和打包测试，因此改用内置 SQLite，
 减少原生模块编译和 ABI 维护成本。
+
+Electron 版本固定为 `45.2.3`，防止 `node:sqlite` API 随主版本变化。

@@ -19,6 +19,10 @@ The first milestone proves the complete local desktop path:
 - Preload uses CommonJS because Electron sandboxed preload scripts do not support ESM.
 - Renderer has no Node integration and only receives the typed `jobWorkbench` API.
 - PDF rendering uses a hidden BrowserWindow and never loads remote resources.
+- Data-layer migration is transactional, checked with `PRAGMA integrity_check`, and preceded by
+  a safety backup.
+- `schema_migrations` records schema versions. The current schema version is 2.
+- Durable tasks are stored in SQLite with idempotency keys and interrupted-on-restart handling.
 
 ## Database decision
 

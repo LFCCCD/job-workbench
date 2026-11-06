@@ -400,6 +400,62 @@ footer {
   margin-top: 18px;
 }
 
+.migration-preview dl {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 7px 12px;
+  margin: 15px 0;
+}
+
+.migration-preview dt {
+  color: #60747b;
+  font-size: 12px;
+}
+
+.migration-preview dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.count-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.count-grid div {
+  padding: 10px;
+  border-radius: 9px;
+  background: #f2f8f7;
+}
+
+.count-grid span,
+.count-grid strong {
+  display: block;
+}
+
+.count-grid span {
+  color: #60747b;
+  font-size: 11px;
+}
+
+.count-grid strong {
+  margin-top: 2px;
+  color: #0b7779;
+  font-size: 20px;
+}
+
+.warnings {
+  margin: 13px 0 0;
+  padding: 10px 12px 10px 30px;
+  border-radius: 9px;
+  color: #8b5b16;
+  background: #fff3df;
+  font-size: 12px;
+}
+
 .toast {
   position: fixed;
   right: 24px;

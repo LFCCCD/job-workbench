@@ -17,7 +17,11 @@ const api: JobWorkbenchApi = {
     ipcRenderer.invoke("workbench:archive-jobs", { ids }),
   restoreJobs: (ids: string[]) =>
     ipcRenderer.invoke("workbench:restore-jobs", { ids }),
-  chooseAndMigrate: () => ipcRenderer.invoke("workbench:migrate-database"),
+  inspectLegacyDatabase: () =>
+    ipcRenderer.invoke("workbench:inspect-legacy-database"),
+  confirmLegacyMigration: () =>
+    ipcRenderer.invoke("workbench:confirm-migration"),
+  chooseAndRestore: () => ipcRenderer.invoke("workbench:restore-backup"),
   createBackup: () => ipcRenderer.invoke("workbench:create-backup"),
   exportResumePdf: () => ipcRenderer.invoke("workbench:export-resume"),
 };

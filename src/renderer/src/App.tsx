@@ -4,6 +4,7 @@ import type {
   JobRecord,
   JobStatus,
   ManualJobInput,
+  MigrationPreview,
 } from "../../shared/contracts";
 import { jobStatuses } from "../../shared/contracts";
 
@@ -22,6 +23,8 @@ export function App() {
   const [includeArchived, setIncludeArchived] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [showAddDialog, setShowAddDialog] = useState(false);
+  const [migrationPreview, setMigrationPreview] =
+    useState<MigrationPreview | null>(null);
   const [form, setForm] = useState<ManualJobInput>(emptyForm);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
@@ -110,13 +113,38 @@ export function App() {
   }
 
   async function migrate() {
+    setBusy(true);
+    try {
+      const preview = await window.jobWorkbench.inspectLegacyDatabase();
+      if (preview) setMigrationPreview(preview);
+    } catch (error) {
+      showMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmMigration() {
     await runOperation(async () => {
-      const result = await window.jobWorkbench.chooseAndMigrate();
+      const result = await window.jobWorkbench.confirmLegacyMigration();
+      setMigrationPreview(null);
+      showMessage(
+        `迁移完成：${Object.entries(result.counts)
+          .map(([table, count]) => `${table} ${count}`)
+          .join("，")}`,
+      );
+    });
+  }
+
+  async function restoreBackup() {
+    await runOperation(async () => {
+      const result = await window.jobWorkbench.chooseAndRestore();
       if (result) {
         showMessage(
-          `迁移完成：${Object.entries(result.counts)
-            .map(([table, count]) => `${table} ${count}`)
-            .join("，")}`,
+          `已从备份恢复 ${Object.values(result.counts).reduce(
+            (sum, count) => sum + count,
+            0,
+          )} 条记录`,
         );
       }
     });
@@ -175,6 +203,9 @@ export function App() {
             </button>
             <button onClick={() => void backup()} disabled={busy}>
               创建备份
+            </button>
+            <button onClick={() => void restoreBackup()} disabled={busy}>
+              恢复备份
             </button>
             <button onClick={() => void exportResume()} disabled={busy}>
               导出简历 PDF
@@ -300,9 +331,59 @@ export function App() {
         </section>
 
         <footer>
-          数据库：{dashboard?.databasePath || "正在初始化"}
+          数据库：{dashboard?.databasePath || "正在初始化"} · Schema v
+          {dashboard?.schemaVersion ?? "-"} · 待处理任务{" "}
+          {dashboard?.pendingTasks ?? 0}
         </footer>
       </main>
+
+      {migrationPreview ? (
+        <div className="modal-backdrop">
+          <section className="modal migration-preview">
+            <p className="eyebrow">MIGRATION PREVIEW</p>
+            <h2>确认迁移旧数据库</h2>
+            <p className="muted">迁移前会自动创建当前数据库的安全备份。</p>
+            <dl>
+              <dt>源数据库</dt>
+              <dd>{migrationPreview.sourcePath}</dd>
+              <dt>完整性</dt>
+              <dd>{migrationPreview.integrity}</dd>
+              <dt>源 Schema</dt>
+              <dd>v{migrationPreview.schemaVersion || "未记录"}</dd>
+            </dl>
+            <div className="count-grid">
+              {Object.entries(migrationPreview.counts).map(
+                ([table, count]) => (
+                  <div key={table}>
+                    <span>{table}</span>
+                    <strong>{count}</strong>
+                  </div>
+                ),
+              )}
+            </div>
+            {migrationPreview.warnings.length ? (
+              <ul className="warnings">
+                {migrationPreview.warnings.map((warning) => (
+                  <li key={warning}>{warning}</li>
+                ))}
+              </ul>
+            ) : null}
+            <div className="modal-actions">
+              <button type="button" onClick={() => setMigrationPreview(null)}>
+                取消
+              </button>
+              <button
+                className="primary"
+                type="button"
+                onClick={() => void confirmMigration()}
+                disabled={busy}
+              >
+                确认迁移
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
 
       {showAddDialog ? (
         <div className="modal-backdrop">

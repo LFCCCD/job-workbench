@@ -10,6 +10,11 @@ import type {
   JobRecord,
   JobStatus,
   ManualJobInput,
+  MigrationPreview,
+  MigrationResult,
+  RestoreResult,
+  TaskRecord,
+  TaskStatus,
 } from "../shared/contracts";
 
 type SqlRow = Record<string, unknown>;
@@ -36,6 +41,16 @@ const JOB_COLUMNS = `
   notes, contacted_at, applied_at, next_follow_up_at, first_seen_at,
   last_seen_at, updated_at
 `;
+
+const CURRENT_SCHEMA_VERSION = 2;
+const REQUIRED_TABLES = [
+  "jobs",
+  "job_events",
+  "resume_profile",
+  "resume_facts",
+  "resume_versions",
+  "app_settings",
+] as const;
 
 export class JobDatabase {
   readonly dataDir: string;
@@ -146,12 +161,38 @@ export class JobDatabase {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS tasks (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        progress INTEGER NOT NULL DEFAULT 0,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        result_json TEXT NOT NULL DEFAULT '{}',
+        error TEXT NOT NULL DEFAULT '',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        idempotency_key TEXT UNIQUE,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        heartbeat_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        applied_at TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
       CREATE INDEX IF NOT EXISTS idx_jobs_archived ON jobs(archived_at);
       CREATE INDEX IF NOT EXISTS idx_job_events_job ON job_events(job_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, created_at);
     `);
 
     this.ensureArchivedColumn();
+    this.applyMigrations();
+    this.checkIntegrity();
+    this.markInterruptedTasks();
   }
 
   private ensureArchivedColumn() {
@@ -160,6 +201,233 @@ export class JobDatabase {
       .all() as SqlRow[];
     if (!columns.some((column) => column.name === "archived_at")) {
       this.db.exec("ALTER TABLE jobs ADD COLUMN archived_at TEXT");
+    }
+  }
+
+  getSchemaVersion(): number {
+    const row = this.db
+      .prepare(
+        "SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations",
+      )
+      .get() as SqlRow;
+    return Number(row.version || 0);
+  }
+
+  private applyMigrations() {
+    const record = this.db.prepare(`
+      INSERT OR IGNORE INTO schema_migrations (version, name, applied_at)
+      VALUES (?, ?, ?)
+    `);
+    const timestamp = new Date().toISOString();
+    if (this.getSchemaVersion() < 1) {
+      record.run(1, "initial-desktop-schema", timestamp);
+    }
+    if (this.getSchemaVersion() < 2) {
+      const tableNames = new Set(
+        (
+          this.db
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .all() as SqlRow[]
+        ).map((row) => String(row.name)),
+      );
+      if (!tableNames.has("tasks") || !tableNames.has("schema_migrations")) {
+        throw new Error("M2 schema migration prerequisites are missing");
+      }
+      record.run(2, "durable-tasks-and-archive", timestamp);
+    }
+    if (this.getSchemaVersion() > CURRENT_SCHEMA_VERSION) {
+      throw new Error("数据库版本高于当前应用版本");
+    }
+    this.db.exec(`PRAGMA user_version = ${CURRENT_SCHEMA_VERSION}`);
+  }
+
+  checkIntegrity(): string {
+    const row = this.db.prepare("PRAGMA integrity_check").get() as SqlRow;
+    const result = String(row.integrity_check || "");
+    if (result !== "ok") {
+      throw new Error(`数据库完整性检查失败：${result}`);
+    }
+    return result;
+  }
+
+  private markInterruptedTasks() {
+    this.db
+      .prepare(`
+        UPDATE tasks
+        SET status = 'interrupted',
+            error = '应用重启时任务尚未完成',
+            finished_at = ?
+        WHERE status = 'running'
+      `)
+      .run(new Date().toISOString());
+  }
+
+  createTask(
+    type: string,
+    payload: Record<string, unknown> = {},
+    idempotencyKey: string | null = null,
+  ): TaskRecord {
+    if (idempotencyKey) {
+      const existing = this.db
+        .prepare("SELECT * FROM tasks WHERE idempotency_key = ?")
+        .get(idempotencyKey) as SqlRow | undefined;
+      if (existing) return this.rowToTask(existing);
+    }
+    const id = `task-${randomUUID()}`;
+    const timestamp = new Date().toISOString();
+    this.db
+      .prepare(`
+        INSERT INTO tasks (
+          id, type, status, progress, payload_json, result_json, error,
+          attempts, idempotency_key, created_at
+        ) VALUES (?, ?, 'queued', 0, ?, '{}', '', 0, ?, ?)
+      `)
+      .run(
+        id,
+        type,
+        JSON.stringify(payload),
+        idempotencyKey,
+        timestamp,
+      );
+    return this.getTask(id)!;
+  }
+
+  getTask(id: string): TaskRecord | null {
+    const row = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as
+      | SqlRow
+      | undefined;
+    return row ? this.rowToTask(row) : null;
+  }
+
+  updateTask(
+    id: string,
+    patch: {
+      status?: TaskStatus;
+      progress?: number;
+      result?: Record<string, unknown>;
+      error?: string;
+      attempts?: number;
+    },
+  ): TaskRecord {
+    const current = this.getTask(id);
+    if (!current) throw new Error("任务不存在");
+    const timestamp = new Date().toISOString();
+    const status = patch.status || current.status;
+    this.db
+      .prepare(`
+        UPDATE tasks SET
+          status = ?, progress = ?, result_json = ?, error = ?, attempts = ?,
+          started_at = CASE
+            WHEN ? = 'running' AND started_at IS NULL THEN ?
+            ELSE started_at
+          END,
+          finished_at = CASE
+            WHEN ? IN ('succeeded', 'failed', 'cancelled', 'interrupted')
+              THEN ?
+            ELSE finished_at
+          END,
+          heartbeat_at = ?
+        WHERE id = ?
+      `)
+      .run(
+        status,
+        Math.max(0, Math.min(100, patch.progress ?? current.progress)),
+        JSON.stringify(patch.result ?? current.result),
+        patch.error ?? current.error,
+        patch.attempts ?? current.attempts,
+        status,
+        timestamp,
+        status,
+        timestamp,
+        timestamp,
+        id,
+      );
+    return this.getTask(id)!;
+  }
+
+  private rowToTask(row: SqlRow): TaskRecord {
+    return {
+      id: String(row.id),
+      type: String(row.type),
+      status: String(row.status) as TaskStatus,
+      progress: Number(row.progress || 0),
+      payload: JSON.parse(String(row.payload_json || "{}")) as Record<
+        string,
+        unknown
+      >,
+      result: JSON.parse(String(row.result_json || "{}")) as Record<
+        string,
+        unknown
+      >,
+      error: String(row.error || ""),
+      attempts: Number(row.attempts || 0),
+      idempotencyKey: row.idempotency_key
+        ? String(row.idempotency_key)
+        : null,
+      createdAt: String(row.created_at || ""),
+      startedAt: row.started_at ? String(row.started_at) : null,
+      finishedAt: row.finished_at ? String(row.finished_at) : null,
+      heartbeatAt: row.heartbeat_at ? String(row.heartbeat_at) : null,
+    };
+  }
+
+  inspectLegacyDatabase(sourcePath: string): MigrationPreview {
+    if (!fs.existsSync(sourcePath)) throw new Error("旧数据库不存在");
+    const source = new DatabaseSync(sourcePath, { readOnly: true });
+    try {
+      const integrityRow = source
+        .prepare("PRAGMA integrity_check")
+        .get() as SqlRow;
+      const integrity = String(integrityRow.integrity_check || "");
+      if (integrity !== "ok") {
+        throw new Error(`源数据库完整性检查失败：${integrity}`);
+      }
+      const sourceTables = new Set(
+        (
+          source
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .all() as SqlRow[]
+        ).map((row) => String(row.name)),
+      );
+      const missingTables = REQUIRED_TABLES.filter(
+        (table) => !sourceTables.has(table),
+      );
+      if (!sourceTables.has("jobs")) {
+        throw new Error("选择的数据库不是旧版求职工作台数据库");
+      }
+      const counts = Object.fromEntries(
+        REQUIRED_TABLES.map((table) => [
+          table,
+          sourceTables.has(table)
+            ? Number(
+                (
+                  source
+                    .prepare(`SELECT COUNT(*) AS count FROM ${table}`)
+                    .get() as SqlRow
+                ).count || 0,
+              )
+            : 0,
+        ]),
+      );
+      const versionRow = source
+        .prepare("PRAGMA user_version")
+        .get() as SqlRow;
+      const schemaVersion = Number(versionRow.user_version || 0);
+      const warnings = missingTables.map(
+        (table) => `源数据库缺少 ${table}，将跳过该表`,
+      );
+      if (schemaVersion === 0) {
+        warnings.push("源数据库没有 Schema 版本记录，将按 V0.5 兼容模式迁移");
+      }
+      return {
+        sourcePath,
+        integrity,
+        schemaVersion,
+        counts,
+        warnings,
+      };
+    } finally {
+      source.close();
     }
   }
 
@@ -235,6 +503,15 @@ export class JobDatabase {
     const lastBackup = this.db
       .prepare("SELECT value FROM app_settings WHERE key = 'lastBackupPath'")
       .get() as SqlRow | undefined;
+    const pendingTasks = Number(
+      (
+        this.db
+          .prepare(
+            "SELECT COUNT(*) AS count FROM tasks WHERE status IN ('queued', 'running')",
+          )
+          .get() as SqlRow
+      ).count || 0,
+    );
 
     return {
       total,
@@ -244,6 +521,8 @@ export class JobDatabase {
       statusCounts,
       databasePath: this.databasePath,
       lastBackupPath: lastBackup ? String(lastBackup.value) : null,
+      schemaVersion: this.getSchemaVersion(),
+      pendingTasks,
     };
   }
 
@@ -334,12 +613,8 @@ export class JobDatabase {
     return destination;
   }
 
-  async migrateLegacy(sourcePath: string): Promise<{
-    sourcePath: string;
-    backupPath: string;
-    counts: Record<string, number>;
-  }> {
-    if (!fs.existsSync(sourcePath)) throw new Error("旧数据库不存在");
+  async migrateLegacy(sourcePath: string): Promise<MigrationResult> {
+    const preview = this.inspectLegacyDatabase(sourcePath);
     const backupPath = await this.createBackup("before-migration");
     const source = new DatabaseSync(sourcePath, { readOnly: true });
     const counts: Record<string, number> = {};
@@ -466,7 +741,87 @@ export class JobDatabase {
     } finally {
       source.close();
     }
-    return { sourcePath, backupPath, counts };
+    this.checkIntegrity();
+    return { sourcePath, backupPath, counts: preview.counts };
+  }
+
+  async restoreBackup(sourcePath: string): Promise<RestoreResult> {
+    const preview = this.inspectLegacyDatabase(sourcePath);
+    const safetyBackup = await this.createBackup("pre-restore");
+    const escapedPath = path.resolve(sourcePath).replaceAll("'", "''");
+    this.db.exec("PRAGMA foreign_keys = OFF");
+    this.db.exec(`ATTACH DATABASE '${escapedPath}' AS restore_db`);
+    try {
+      const sourceTables = new Set(
+        (
+          this.db
+            .prepare(
+              "SELECT name FROM restore_db.sqlite_master WHERE type = 'table'",
+            )
+            .all() as SqlRow[]
+        ).map((row) => String(row.name)),
+      );
+      const targetColumns = (table: string) =>
+        new Set(
+          (
+            this.db.prepare(`PRAGMA main.table_info(${table})`).all() as SqlRow[]
+          ).map((row) => String(row.name)),
+        );
+      const sourceColumns = (table: string) =>
+        new Set(
+          (
+            this.db
+              .prepare(`PRAGMA restore_db.table_info(${table})`)
+              .all() as SqlRow[]
+          ).map((row) => String(row.name)),
+        );
+
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        this.db.exec("DELETE FROM job_events");
+        this.db.exec("DELETE FROM jobs");
+        this.db.exec("DELETE FROM resume_facts");
+        this.db.exec("DELETE FROM resume_versions");
+        this.db.exec("DELETE FROM resume_profile");
+        this.db.exec("DELETE FROM tasks");
+        this.db.exec("DELETE FROM app_settings");
+        for (const table of [
+          "jobs",
+          "job_events",
+          "resume_profile",
+          "resume_facts",
+          "resume_versions",
+          "tasks",
+          "app_settings",
+        ]) {
+          if (!sourceTables.has(table)) continue;
+          const target = targetColumns(table);
+          const common = [...sourceColumns(table)].filter((column) =>
+            target.has(column),
+          );
+          if (!common.length) continue;
+          const columns = common.join(", ");
+          this.db.exec(
+            `INSERT INTO main.${table} (${columns})
+             SELECT ${columns} FROM restore_db.${table}`,
+          );
+        }
+        this.db.exec("COMMIT");
+      } catch (error) {
+        this.db.exec("ROLLBACK");
+        throw error;
+      }
+    } finally {
+      this.db.exec("DETACH DATABASE restore_db");
+      this.db.exec("PRAGMA foreign_keys = ON");
+    }
+    this.applyMigrations();
+    this.checkIntegrity();
+    return {
+      restoredFrom: sourcePath,
+      safetyBackup,
+      counts: preview.counts,
+    };
   }
 
   getResumeDocumentData(): {
