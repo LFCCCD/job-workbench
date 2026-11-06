@@ -15,6 +15,13 @@ import type {
   JobStatus,
   ManualJobInput,
   MigrationPreview,
+  ResumeFactFields,
+  ResumeFactKind,
+  ResumeFactRecord,
+  ResumeProfileInput,
+  ResumeVersionFields,
+  ResumeVersionRecord,
+  ResumeWorkspace,
   SavedView,
   TaskRecord,
 } from "../../shared/contracts";
@@ -86,6 +93,11 @@ const viewCopy = {
     title: "AI 分析",
     description: "结构化要求、事实匹配、风险证据与面试准备",
   },
+  resume: {
+    eyebrow: "RESUME FACT LIBRARY",
+    title: "简历",
+    description: "已核实事实、岗位版本组合与 PDF 导出",
+  },
   tasks: {
     eyebrow: "TASK CENTER",
     title: "任务中心",
@@ -121,6 +133,49 @@ const aiSeverityLabels = {
   medium: "中风险",
   low: "低风险",
 } as const;
+
+const resumeFactKindOptions: ResumeFactKind[] = [
+  "教育经历",
+  "实习经历",
+  "项目经历",
+  "技能",
+  "证书",
+  "奖项",
+  "校园经历",
+];
+
+const emptyResumeProfile: ResumeProfileInput = {
+  fullName: "",
+  phone: "",
+  email: "",
+  currentCity: "",
+  targetRoles: [],
+  summary: "",
+};
+
+const emptyResumeFact: ResumeFactFields = {
+  kind: "项目经历",
+  title: "",
+  organization: "",
+  role: "",
+  startDate: "",
+  endDate: "",
+  location: "",
+  bullets: [],
+  skills: [],
+  evidence: "",
+  verified: false,
+  sortOrder: 0,
+};
+
+const emptyResumeVersion: ResumeVersionFields = {
+  name: "",
+  targetRole: "",
+  template: "general",
+  summary: "",
+  selectedFactIds: [],
+  includeUnverified: false,
+};
 
 const emptyEditForm: JobRecordUpdate = {
   title: "",
@@ -164,7 +219,7 @@ function eventLabel(eventType: string): string {
 
 export function App() {
   const [view, setView] = useState<
-    "jobs" | "collector" | "ai" | "tasks"
+    "jobs" | "collector" | "ai" | "resume" | "tasks"
   >("jobs");
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [jobs, setJobs] = useState<JobRecord[]>([]);
@@ -194,6 +249,23 @@ export function App() {
     dailyRequestLimit: 20,
     apiKey: "",
   });
+  const [resumeWorkspace, setResumeWorkspace] =
+    useState<ResumeWorkspace | null>(null);
+  const [resumeProfileForm, setResumeProfileForm] =
+    useState<ResumeProfileInput>(emptyResumeProfile);
+  const [resumeFactEditor, setResumeFactEditor] = useState<{
+    id: string | null;
+    fields: ResumeFactFields;
+  } | null>(null);
+  const [resumeVersionEditor, setResumeVersionEditor] = useState<{
+    id: string | null;
+    fields: ResumeVersionFields;
+  } | null>(null);
+  const [resumeFactFilter, setResumeFactFilter] = useState<
+    ResumeFactKind | ""
+  >("");
+  const [selectedResumeVersionId, setSelectedResumeVersionId] =
+    useState<string>("");
   const [collectorRequest, setCollectorRequest] =
     useState<CollectorRequest>(defaultCollectorRequest);
   const [collectorQueriesText, setCollectorQueriesText] = useState(
@@ -226,6 +298,7 @@ export function App() {
       nextAiSettings,
       nextAiUsage,
       nextAiAnalyses,
+      nextResumeWorkspace,
     ] = await Promise.all([
       window.jobWorkbench.getDashboard(),
       window.jobWorkbench.listJobs(nextFilters),
@@ -236,6 +309,7 @@ export function App() {
       window.jobWorkbench.getAiSettings(),
       window.jobWorkbench.getAiUsage(),
       window.jobWorkbench.listAiAnalyses(),
+      window.jobWorkbench.getResumeWorkspace(),
     ]);
     setDashboard(nextDashboard);
     setJobs(nextJobs);
@@ -246,6 +320,22 @@ export function App() {
     setAiSettings(nextAiSettings);
     setAiUsage(nextAiUsage);
     setAiAnalyses(nextAiAnalyses);
+    setResumeWorkspace(nextResumeWorkspace);
+    if (nextResumeWorkspace.profile) {
+      setResumeProfileForm({
+        fullName: nextResumeWorkspace.profile.fullName,
+        phone: nextResumeWorkspace.profile.phone,
+        email: nextResumeWorkspace.profile.email,
+        currentCity: nextResumeWorkspace.profile.currentCity,
+        targetRoles: nextResumeWorkspace.profile.targetRoles,
+        summary: nextResumeWorkspace.profile.summary,
+      });
+    }
+    setSelectedResumeVersionId((current) =>
+      nextResumeWorkspace.versions.some((version) => version.id === current)
+        ? current
+        : nextResumeWorkspace.versions[0]?.id || "",
+    );
     setAiForm((current) => ({
       provider: nextAiSettings.provider,
       baseUrl: nextAiSettings.baseUrl,
@@ -651,6 +741,148 @@ export function App() {
     });
   }
 
+  async function saveResumeProfile() {
+    if (!resumeProfileForm.fullName.trim()) {
+      showMessage("姓名不能为空");
+      return;
+    }
+    await runOperation(async () => {
+      await window.jobWorkbench.saveResumeProfile(resumeProfileForm);
+      showMessage("个人资料已保存");
+    });
+  }
+
+  function openNewResumeFact() {
+    setResumeFactEditor({
+      id: null,
+      fields: {
+        ...emptyResumeFact,
+        sortOrder: (resumeWorkspace?.facts.length || 0) * 10 + 10,
+      },
+    });
+  }
+
+  function openResumeFact(fact: ResumeFactRecord) {
+    setResumeFactEditor({
+      id: fact.id,
+      fields: {
+        kind: fact.kind,
+        title: fact.title,
+        organization: fact.organization,
+        role: fact.role,
+        startDate: fact.startDate,
+        endDate: fact.endDate,
+        location: fact.location,
+        bullets: [...fact.bullets],
+        skills: [...fact.skills],
+        evidence: fact.evidence,
+        verified: fact.verified,
+        sortOrder: fact.sortOrder,
+      },
+    });
+  }
+
+  async function saveResumeFact() {
+    if (!resumeFactEditor) return;
+    if (!resumeFactEditor.fields.title.trim()) {
+      showMessage("事实标题不能为空");
+      return;
+    }
+    await runOperation(async () => {
+      await window.jobWorkbench.saveResumeFact(
+        resumeFactEditor.id,
+        resumeFactEditor.fields,
+      );
+      setResumeFactEditor(null);
+      showMessage("简历事实已保存");
+    });
+  }
+
+  async function toggleResumeFactVerified(fact: ResumeFactRecord) {
+    await runOperation(async () => {
+      await window.jobWorkbench.setResumeFactVerified(
+        fact.id,
+        !fact.verified,
+      );
+      showMessage(fact.verified ? "已取消核实" : "事实已核实");
+    });
+  }
+
+  async function deleteResumeFact(fact: ResumeFactRecord) {
+    const confirmed = window.confirm(
+      `删除“${fact.title}”？已有简历版本中的该事实引用也会移除。`,
+    );
+    if (!confirmed) return;
+    await runOperation(async () => {
+      const result = await window.jobWorkbench.deleteResumeFact(fact.id);
+      showMessage(result.message);
+    });
+  }
+
+  function openNewResumeVersion() {
+    setResumeVersionEditor({
+      id: null,
+      fields: {
+        ...emptyResumeVersion,
+        name: "默认求职版本",
+        targetRole: resumeProfileForm.targetRoles[0] || "",
+        selectedFactIds:
+          resumeWorkspace?.facts
+            .filter((fact) => fact.verified)
+            .map((fact) => fact.id) || [],
+      },
+    });
+  }
+
+  function openResumeVersion(version: ResumeVersionRecord) {
+    setResumeVersionEditor({
+      id: version.id,
+      fields: {
+        name: version.name,
+        targetRole: version.targetRole,
+        template: version.template,
+        summary: version.summary,
+        selectedFactIds: [...version.selectedFactIds],
+        includeUnverified: version.includeUnverified,
+      },
+    });
+  }
+
+  async function saveResumeVersion() {
+    if (!resumeVersionEditor) return;
+    if (!resumeVersionEditor.fields.name.trim()) {
+      showMessage("版本名称不能为空");
+      return;
+    }
+    await runOperation(async () => {
+      const saved = await window.jobWorkbench.saveResumeVersion(
+        resumeVersionEditor.id,
+        resumeVersionEditor.fields,
+      );
+      setSelectedResumeVersionId(saved.id);
+      setResumeVersionEditor(null);
+      showMessage("简历版本已保存");
+    });
+  }
+
+  async function deleteResumeVersion(version: ResumeVersionRecord) {
+    const confirmed = window.confirm(`删除简历版本“${version.name}”？`);
+    if (!confirmed) return;
+    await runOperation(async () => {
+      const result = await window.jobWorkbench.deleteResumeVersion(version.id);
+      showMessage(result.message);
+    });
+  }
+
+  async function exportResumeVersion(versionId?: string | null) {
+    await runOperation(async () => {
+      const destination = await window.jobWorkbench.exportResumePdf(
+        versionId || selectedResumeVersionId || null,
+      );
+      if (destination) showMessage(`简历已导出：${destination}`);
+    });
+  }
+
   async function cancelTask(id: string) {
     await runOperation(async () => {
       await window.jobWorkbench.cancelTask(id);
@@ -669,13 +901,6 @@ export function App() {
     await runOperation(async () => {
       const result = await window.jobWorkbench.clearFinishedTasks();
       showMessage(result.message);
-    });
-  }
-
-  async function exportResume() {
-    await runOperation(async () => {
-      const destination = await window.jobWorkbench.exportResumePdf();
-      if (destination) showMessage(`简历已导出：${destination}`);
     });
   }
 
@@ -707,6 +932,16 @@ export function App() {
   );
   const aiResult =
     aiCurrent?.status === "succeeded" ? aiCurrent.result : null;
+  const activeResumeVersion =
+    resumeWorkspace?.versions.find(
+      (version) => version.id === selectedResumeVersionId,
+    ) ||
+    resumeWorkspace?.versions[0] ||
+    null;
+  const filteredResumeFacts =
+    resumeWorkspace?.facts.filter(
+      (fact) => !resumeFactFilter || fact.kind === resumeFactFilter,
+    ) || [];
   const copy = viewCopy[view];
 
   return (
@@ -716,7 +951,7 @@ export function App() {
           <div className="brand-mark">J</div>
           <div>
             <strong>求职工作台</strong>
-            <small>M2 · AI Evidence Lab</small>
+            <small>M2 · Resume & Evidence</small>
           </div>
         </div>
         <nav>
@@ -742,12 +977,17 @@ export function App() {
             AI 分析
           </button>
           <button
+            className={view === "resume" ? "active" : ""}
+            onClick={() => setView("resume")}
+          >
+            简历
+          </button>
+          <button
             className={view === "tasks" ? "active" : ""}
             onClick={() => setView("tasks")}
           >
             任务中心
           </button>
-          <button disabled>简历</button>
           <button disabled>跟进</button>
         </nav>
         <div className="sidebar-status">
@@ -775,7 +1015,10 @@ export function App() {
                 <button onClick={() => void restoreBackup()} disabled={busy}>
                   恢复备份
                 </button>
-                <button onClick={() => void exportResume()} disabled={busy}>
+                <button
+                  onClick={() => void exportResumeVersion(null)}
+                  disabled={busy || !resumeWorkspace?.stats.readyForAi}
+                >
                   导出简历 PDF
                 </button>
                 <button
@@ -833,6 +1076,36 @@ export function App() {
                     : aiResult
                       ? "重新分析"
                       : "开始分析"}
+                </button>
+              </>
+            ) : view === "resume" ? (
+              <>
+                <button
+                  onClick={() => void saveResumeProfile()}
+                  disabled={busy}
+                >
+                  保存个人资料
+                </button>
+                <button onClick={openNewResumeFact} disabled={busy}>
+                  新建事实
+                </button>
+                <button onClick={openNewResumeVersion} disabled={busy}>
+                  新建版本
+                </button>
+                <button
+                  className="primary"
+                  onClick={() =>
+                    void exportResumeVersion(
+                      selectedResumeVersionId || null,
+                    )
+                  }
+                  disabled={
+                    busy ||
+                    !activeResumeVersion ||
+                    !activeResumeVersion.selectedFactIds.length
+                  }
+                >
+                  导出当前版本
                 </button>
               </>
             ) : (
@@ -1557,6 +1830,358 @@ export function App() {
               </div>
             )}
           </section>
+        </section>
+
+        <section hidden={view !== "resume"} className="resume-center">
+          <section className="resume-stats">
+            <article>
+              <span>事实总数</span>
+              <strong>{resumeWorkspace?.stats.totalFacts ?? 0}</strong>
+            </article>
+            <article>
+              <span>已核实</span>
+              <strong>{resumeWorkspace?.stats.verifiedFacts ?? 0}</strong>
+            </article>
+            <article>
+              <span>简历版本</span>
+              <strong>{resumeWorkspace?.stats.versionCount ?? 0}</strong>
+            </article>
+            <article>
+              <span>AI 可用事实</span>
+              <strong
+                className={
+                  resumeWorkspace?.stats.readyForAi ? "ready" : ""
+                }
+              >
+                {resumeWorkspace?.stats.readyForAi ? "已就绪" : "待补充"}
+              </strong>
+            </article>
+          </section>
+
+          <section className="panel resume-profile-panel">
+            <div className="resume-section-head">
+              <div>
+                <p className="eyebrow">RESUME PROFILE</p>
+                <h2>个人资料</h2>
+                <p className="muted">
+                  联系方式只会写入你主动导出的 PDF，不会发送给 AI。
+                </p>
+              </div>
+              <span className="status-badge">
+                {resumeWorkspace?.profile
+                  ? `更新于 ${new Date(
+                      resumeWorkspace.profile.updatedAt,
+                    ).toLocaleString()}`
+                  : "尚未填写"}
+              </span>
+            </div>
+            <div className="resume-profile-grid">
+              <label>
+                姓名
+                <input
+                  value={resumeProfileForm.fullName}
+                  onChange={(event) =>
+                    setResumeProfileForm({
+                      ...resumeProfileForm,
+                      fullName: event.target.value,
+                    })
+                  }
+                />
+              </label>
+              <label>
+                电话
+                <input
+                  value={resumeProfileForm.phone}
+                  onChange={(event) =>
+                    setResumeProfileForm({
+                      ...resumeProfileForm,
+                      phone: event.target.value,
+                    })
+                  }
+                />
+              </label>
+              <label>
+                邮箱
+                <input
+                  value={resumeProfileForm.email}
+                  onChange={(event) =>
+                    setResumeProfileForm({
+                      ...resumeProfileForm,
+                      email: event.target.value,
+                    })
+                  }
+                />
+              </label>
+              <label>
+                当前城市
+                <input
+                  value={resumeProfileForm.currentCity}
+                  onChange={(event) =>
+                    setResumeProfileForm({
+                      ...resumeProfileForm,
+                      currentCity: event.target.value,
+                    })
+                  }
+                />
+              </label>
+              <label className="resume-target-roles">
+                目标岗位（用顿号或逗号分隔）
+                <input
+                  value={resumeProfileForm.targetRoles.join("、")}
+                  onChange={(event) =>
+                    setResumeProfileForm({
+                      ...resumeProfileForm,
+                      targetRoles: event.target.value
+                        .split(/[、,，]/)
+                        .map((role) => role.trim())
+                        .filter(Boolean),
+                    })
+                  }
+                />
+              </label>
+              <label className="resume-summary-field">
+                个人概述
+                <textarea
+                  rows={3}
+                  value={resumeProfileForm.summary}
+                  onChange={(event) =>
+                    setResumeProfileForm({
+                      ...resumeProfileForm,
+                      summary: event.target.value,
+                    })
+                  }
+                />
+              </label>
+            </div>
+          </section>
+
+          <div className="resume-workspace">
+            <section className="panel resume-facts-panel">
+              <div className="resume-section-head">
+                <div>
+                  <p className="eyebrow">VERIFIED FACTS</p>
+                  <h2>事实库</h2>
+                  <p className="muted">
+                    项目、职责、指标和技能必须来自真实材料；核实后才默认进入版本和 AI。
+                  </p>
+                </div>
+                <button onClick={openNewResumeFact} disabled={busy}>
+                  新建事实
+                </button>
+              </div>
+              <div className="resume-filter-row">
+                <select
+                  value={resumeFactFilter}
+                  onChange={(event) =>
+                    setResumeFactFilter(
+                      event.target.value as ResumeFactKind | "",
+                    )
+                  }
+                >
+                  <option value="">全部事实</option>
+                  {resumeFactKindOptions.map((kind) => (
+                    <option key={kind}>{kind}</option>
+                  ))}
+                </select>
+                <span className="muted">
+                  当前显示 {filteredResumeFacts.length} 条
+                </span>
+              </div>
+              {filteredResumeFacts.length ? (
+                <div className="resume-fact-list">
+                  {filteredResumeFacts.map((fact) => (
+                    <article
+                      className={`resume-fact-card ${
+                        fact.verified ? "verified" : "unverified"
+                      }`}
+                      key={fact.id}
+                    >
+                      <div className="resume-fact-head">
+                        <div>
+                          <span className="fact-kind">{fact.kind}</span>
+                          <h3>{fact.title}</h3>
+                          <p>
+                            {[fact.organization, fact.role]
+                              .filter(Boolean)
+                              .join(" · ") || "未填写组织或角色"}
+                          </p>
+                        </div>
+                        <span
+                          className={`fact-verification ${
+                            fact.verified ? "verified" : ""
+                          }`}
+                        >
+                          {fact.verified ? "已核实" : "未核实"}
+                        </span>
+                      </div>
+                      <p className="fact-date">
+                        {[fact.startDate, fact.endDate]
+                          .filter(Boolean)
+                          .join(" - ") || "时间未填写"}
+                        {fact.location ? ` · ${fact.location}` : ""}
+                      </p>
+                      {fact.bullets.length ? (
+                        <ul className="fact-bullets">
+                          {fact.bullets.map((bullet) => (
+                            <li key={bullet}>{bullet}</li>
+                          ))}
+                        </ul>
+                      ) : null}
+                      {fact.skills.length ? (
+                        <div className="fact-skills">
+                          {fact.skills.map((skill) => (
+                            <span key={skill}>{skill}</span>
+                          ))}
+                        </div>
+                      ) : null}
+                      {fact.evidence ? (
+                        <p className="fact-evidence">
+                          依据：{fact.evidence}
+                        </p>
+                      ) : null}
+                      <div className="fact-actions">
+                        <button onClick={() => openResumeFact(fact)}>
+                          编辑
+                        </button>
+                        <button
+                          onClick={() =>
+                            void toggleResumeFactVerified(fact)
+                          }
+                          disabled={busy}
+                        >
+                          {fact.verified ? "取消核实" : "确认核实"}
+                        </button>
+                        <button
+                          className="danger"
+                          onClick={() => void deleteResumeFact(fact)}
+                          disabled={busy}
+                        >
+                          删除
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <div className="empty resume-empty">
+                  <strong>
+                    {resumeWorkspace?.stats.totalFacts
+                      ? "当前分类没有事实"
+                      : "还没有简历事实"}
+                  </strong>
+                  <p>
+                    先录入教育、实习、项目和校园经历，再标记为已核实。
+                  </p>
+                  <button
+                    className="primary"
+                    onClick={openNewResumeFact}
+                    disabled={busy}
+                  >
+                    新建第一条事实
+                  </button>
+                </div>
+              )}
+            </section>
+
+            <aside className="panel resume-versions-panel">
+              <div className="resume-section-head">
+                <div>
+                  <p className="eyebrow">TAILORED VERSIONS</p>
+                  <h2>版本组合</h2>
+                </div>
+                <button onClick={openNewResumeVersion} disabled={busy}>
+                  新建版本
+                </button>
+              </div>
+              {resumeWorkspace?.versions.length ? (
+                <div className="resume-version-list">
+                  {resumeWorkspace.versions.map((version) => (
+                    <button
+                      className={
+                        activeResumeVersion?.id === version.id
+                          ? "active"
+                          : ""
+                      }
+                      key={version.id}
+                      onClick={() => setSelectedResumeVersionId(version.id)}
+                    >
+                      <strong>{version.name}</strong>
+                      <span>{version.targetRole || "未设置目标岗位"}</span>
+                      <small>
+                        {version.selectedFactIds.length} 条事实 ·{" "}
+                        {version.includeUnverified
+                          ? "包含未核实"
+                          : "仅已核实"}
+                      </small>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="muted">还没有简历版本。</p>
+              )}
+
+              {activeResumeVersion ? (
+                <div className="active-resume-version">
+                  <div>
+                    <span>当前版本</span>
+                    <strong>{activeResumeVersion.name}</strong>
+                  </div>
+                  {activeResumeVersion.summary ? (
+                    <p>{activeResumeVersion.summary}</p>
+                  ) : null}
+                  <div className="selected-version-facts">
+                    {activeResumeVersion.selectedFactIds.map((factId) => {
+                      const fact = resumeWorkspace?.facts.find(
+                        (candidate) => candidate.id === factId,
+                      );
+                      return fact ? (
+                        <span key={factId}>
+                          {fact.verified ? "✓" : "!"} {fact.title}
+                        </span>
+                      ) : (
+                        <span className="missing" key={factId}>
+                          事实 #{factId} 已删除
+                        </span>
+                      );
+                    })}
+                  </div>
+                  <div className="button-row">
+                    <button
+                      onClick={() => openResumeVersion(activeResumeVersion)}
+                    >
+                      编辑版本
+                    </button>
+                    <button
+                      className="primary"
+                      onClick={() =>
+                        void exportResumeVersion(activeResumeVersion.id)
+                      }
+                      disabled={
+                        busy || !activeResumeVersion.selectedFactIds.length
+                      }
+                    >
+                      导出 PDF
+                    </button>
+                    <button
+                      className="danger"
+                      onClick={() =>
+                        void deleteResumeVersion(activeResumeVersion)
+                      }
+                      disabled={busy}
+                    >
+                      删除版本
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </aside>
+          </div>
+
+          {!resumeWorkspace?.stats.readyForAi ? (
+            <div className="resume-readiness-note">
+              当前没有已核实事实。AI 分析仍可提取 JD，但匹配度置信度会很低。
+            </div>
+          ) : null}
         </section>
 
         <section hidden={view !== "ai"} className="ai-center">
@@ -2309,6 +2934,418 @@ export function App() {
               </button>
               <button className="primary" type="submit" disabled={busy}>
                 添加
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+
+      {resumeFactEditor ? (
+        <div className="modal-backdrop">
+          <form
+            className="modal resume-fact-modal"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveResumeFact();
+            }}
+          >
+            <p className="eyebrow">RESUME FACT</p>
+            <h2>
+              {resumeFactEditor.id ? "编辑事实" : "新建事实"}
+            </h2>
+            <div className="form-row">
+              <label>
+                类型
+                <select
+                  value={resumeFactEditor.fields.kind}
+                  onChange={(event) =>
+                    setResumeFactEditor({
+                      ...resumeFactEditor,
+                      fields: {
+                        ...resumeFactEditor.fields,
+                        kind: event.target.value as ResumeFactKind,
+                      },
+                    })
+                  }
+                >
+                  {resumeFactKindOptions.map((kind) => (
+                    <option key={kind}>{kind}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                排序
+                <input
+                  type="number"
+                  value={resumeFactEditor.fields.sortOrder}
+                  onChange={(event) =>
+                    setResumeFactEditor({
+                      ...resumeFactEditor,
+                      fields: {
+                        ...resumeFactEditor.fields,
+                        sortOrder: Number(event.target.value),
+                      },
+                    })
+                  }
+                />
+              </label>
+            </div>
+            <label>
+              标题
+              <input
+                required
+                value={resumeFactEditor.fields.title}
+                placeholder="例如：电力设备采购平台"
+                onChange={(event) =>
+                  setResumeFactEditor({
+                    ...resumeFactEditor,
+                    fields: {
+                      ...resumeFactEditor.fields,
+                      title: event.target.value,
+                    },
+                  })
+                }
+              />
+            </label>
+            <div className="form-row">
+              <label>
+                组织 / 学校 / 公司
+                <input
+                  value={resumeFactEditor.fields.organization}
+                  onChange={(event) =>
+                    setResumeFactEditor({
+                      ...resumeFactEditor,
+                      fields: {
+                        ...resumeFactEditor.fields,
+                        organization: event.target.value,
+                      },
+                    })
+                  }
+                />
+              </label>
+              <label>
+                角色
+                <input
+                  value={resumeFactEditor.fields.role}
+                  onChange={(event) =>
+                    setResumeFactEditor({
+                      ...resumeFactEditor,
+                      fields: {
+                        ...resumeFactEditor.fields,
+                        role: event.target.value,
+                      },
+                    })
+                  }
+                />
+              </label>
+            </div>
+            <div className="form-row">
+              <label>
+                开始时间
+                <input
+                  value={resumeFactEditor.fields.startDate}
+                  placeholder="2025-09"
+                  onChange={(event) =>
+                    setResumeFactEditor({
+                      ...resumeFactEditor,
+                      fields: {
+                        ...resumeFactEditor.fields,
+                        startDate: event.target.value,
+                      },
+                    })
+                  }
+                />
+              </label>
+              <label>
+                结束时间
+                <input
+                  value={resumeFactEditor.fields.endDate}
+                  placeholder="2026-05 或 至今"
+                  onChange={(event) =>
+                    setResumeFactEditor({
+                      ...resumeFactEditor,
+                      fields: {
+                        ...resumeFactEditor.fields,
+                        endDate: event.target.value,
+                      },
+                    })
+                  }
+                />
+              </label>
+            </div>
+            <label>
+              地点
+              <input
+                value={resumeFactEditor.fields.location}
+                onChange={(event) =>
+                  setResumeFactEditor({
+                    ...resumeFactEditor,
+                    fields: {
+                      ...resumeFactEditor.fields,
+                      location: event.target.value,
+                    },
+                  })
+                }
+              />
+            </label>
+            <label>
+              事实条目（每行一条，只写真实完成的内容）
+              <textarea
+                rows={5}
+                value={resumeFactEditor.fields.bullets.join("\n")}
+                onChange={(event) =>
+                  setResumeFactEditor({
+                    ...resumeFactEditor,
+                    fields: {
+                      ...resumeFactEditor.fields,
+                      bullets: event.target.value
+                        .split(/\r?\n/)
+                        .map((bullet) => bullet.trim())
+                        .filter(Boolean),
+                    },
+                  })
+                }
+              />
+            </label>
+            <label>
+              技能（用逗号分隔）
+              <input
+                value={resumeFactEditor.fields.skills.join("、")}
+                onChange={(event) =>
+                  setResumeFactEditor({
+                    ...resumeFactEditor,
+                    fields: {
+                      ...resumeFactEditor.fields,
+                      skills: event.target.value
+                        .split(/[、,，]/)
+                        .map((skill) => skill.trim())
+                        .filter(Boolean),
+                    },
+                  })
+                }
+              />
+            </label>
+            <label>
+              真实依据
+              <textarea
+                rows={3}
+                value={resumeFactEditor.fields.evidence}
+                placeholder="例如：毕业设计源文件、论文、实习证明、证书编号"
+                onChange={(event) =>
+                  setResumeFactEditor({
+                    ...resumeFactEditor,
+                    fields: {
+                      ...resumeFactEditor.fields,
+                      evidence: event.target.value,
+                    },
+                  })
+                }
+              />
+            </label>
+            <label className="toggle resume-verify-toggle">
+              <input
+                type="checkbox"
+                checked={resumeFactEditor.fields.verified}
+                onChange={(event) =>
+                  setResumeFactEditor({
+                    ...resumeFactEditor,
+                    fields: {
+                      ...resumeFactEditor.fields,
+                      verified: event.target.checked,
+                    },
+                  })
+                }
+              />
+              我已确认这条事实真实、准确并能解释
+            </label>
+            <div className="modal-actions">
+              <button type="button" onClick={() => setResumeFactEditor(null)}>
+                取消
+              </button>
+              <button className="primary" type="submit" disabled={busy}>
+                保存事实
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+
+      {resumeVersionEditor ? (
+        <div className="modal-backdrop">
+          <form
+            className="modal resume-version-modal"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveResumeVersion();
+            }}
+          >
+            <p className="eyebrow">RESUME VERSION</p>
+            <h2>
+              {resumeVersionEditor.id ? "编辑简历版本" : "新建简历版本"}
+            </h2>
+            <div className="form-row">
+              <label>
+                版本名称
+                <input
+                  required
+                  value={resumeVersionEditor.fields.name}
+                  onChange={(event) =>
+                    setResumeVersionEditor({
+                      ...resumeVersionEditor,
+                      fields: {
+                        ...resumeVersionEditor.fields,
+                        name: event.target.value,
+                      },
+                    })
+                  }
+                />
+              </label>
+              <label>
+                目标岗位
+                <input
+                  value={resumeVersionEditor.fields.targetRole}
+                  onChange={(event) =>
+                    setResumeVersionEditor({
+                      ...resumeVersionEditor,
+                      fields: {
+                        ...resumeVersionEditor.fields,
+                        targetRole: event.target.value,
+                      },
+                    })
+                  }
+                />
+              </label>
+            </div>
+            <label>
+              版式
+              <select
+                value={resumeVersionEditor.fields.template}
+                onChange={(event) =>
+                  setResumeVersionEditor({
+                    ...resumeVersionEditor,
+                    fields: {
+                      ...resumeVersionEditor.fields,
+                      template: event.target
+                        .value as ResumeVersionFields["template"],
+                    },
+                  })
+                }
+              >
+                <option value="general">通用</option>
+                <option value="technical">技术岗位</option>
+                <option value="implementation">实施/技术支持</option>
+              </select>
+            </label>
+            <label>
+              版本概述
+              <textarea
+                rows={3}
+                value={resumeVersionEditor.fields.summary}
+                onChange={(event) =>
+                  setResumeVersionEditor({
+                    ...resumeVersionEditor,
+                    fields: {
+                      ...resumeVersionEditor.fields,
+                      summary: event.target.value,
+                    },
+                  })
+                }
+              />
+            </label>
+            <label className="toggle resume-verify-toggle">
+              <input
+                type="checkbox"
+                checked={resumeVersionEditor.fields.includeUnverified}
+                onChange={(event) => {
+                  const includeUnverified = event.target.checked;
+                  const verifiedIds = new Set(
+                    resumeWorkspace?.facts
+                      .filter((fact) => fact.verified)
+                      .map((fact) => fact.id) || [],
+                  );
+                  setResumeVersionEditor({
+                    ...resumeVersionEditor,
+                    fields: {
+                      ...resumeVersionEditor.fields,
+                      includeUnverified,
+                      selectedFactIds: includeUnverified
+                        ? resumeVersionEditor.fields.selectedFactIds
+                        : resumeVersionEditor.fields.selectedFactIds.filter(
+                            (id) => verifiedIds.has(id),
+                          ),
+                    },
+                  });
+                }}
+              />
+              允许加入未核实事实（不推荐）
+            </label>
+            <div className="version-fact-picker">
+              <div>
+                <strong>选择事实</strong>
+                <span>
+                  已选 {resumeVersionEditor.fields.selectedFactIds.length} 条
+                </span>
+              </div>
+              {resumeWorkspace?.facts.length ? (
+                resumeWorkspace.facts.map((fact) => {
+                  const checked =
+                    resumeVersionEditor.fields.selectedFactIds.includes(
+                      fact.id,
+                    );
+                  const disabled =
+                    !fact.verified &&
+                    !resumeVersionEditor.fields.includeUnverified;
+                  return (
+                    <label
+                      className={`version-fact-option ${
+                        disabled ? "disabled" : ""
+                      }`}
+                      key={fact.id}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={disabled}
+                        onChange={() =>
+                          setResumeVersionEditor({
+                            ...resumeVersionEditor,
+                            fields: {
+                              ...resumeVersionEditor.fields,
+                              selectedFactIds: checked
+                                ? resumeVersionEditor.fields.selectedFactIds.filter(
+                                    (id) => id !== fact.id,
+                                  )
+                                : [
+                                    ...resumeVersionEditor.fields
+                                      .selectedFactIds,
+                                    fact.id,
+                                  ],
+                            },
+                          })
+                        }
+                      />
+                      <span>
+                        <strong>{fact.title}</strong>
+                        <small>
+                          {fact.kind} · {fact.verified ? "已核实" : "未核实"}
+                        </small>
+                      </span>
+                    </label>
+                  );
+                })
+              ) : (
+                <p className="muted">请先在事实库中录入内容。</p>
+              )}
+            </div>
+            <div className="modal-actions">
+              <button
+                type="button"
+                onClick={() => setResumeVersionEditor(null)}
+              >
+                取消
+              </button>
+              <button className="primary" type="submit" disabled={busy}>
+                保存版本
               </button>
             </div>
           </form>

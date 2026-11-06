@@ -10,6 +10,10 @@ import {
   CollectorCacheEntrySchema,
   CollectorCandidateSchema,
   ListJobsSchema,
+  ResumeProfileInputSchema,
+  SaveResumeFactSchema,
+  SaveResumeVersionSchema,
+  resumeFactKinds,
 } from "../shared/contracts";
 import type {
   AiAnalysisRecord,
@@ -34,6 +38,14 @@ import type {
   MigrationPreview,
   MigrationResult,
   RestoreResult,
+  ResumeFactFields,
+  ResumeFactKind,
+  ResumeFactRecord,
+  ResumeProfileInput,
+  ResumeProfileRecord,
+  ResumeVersionFields,
+  ResumeVersionRecord,
+  ResumeWorkspace,
   SavedView,
   TaskRecord,
   TaskStatus,
@@ -1848,19 +1860,390 @@ export class JobDatabase {
     };
   }
 
-  getResumeDocumentData(): {
-    profile: SqlRow | null;
-    facts: SqlRow[];
-  } {
-    const profile = this.db
+  getResumeWorkspace(): ResumeWorkspace {
+    const profileRow = this.db
       .prepare("SELECT * FROM resume_profile WHERE id = 1")
       .get() as SqlRow | undefined;
-    const facts = this.db
+    const facts = (
+      this.db
+        .prepare("SELECT * FROM resume_facts ORDER BY sort_order, id")
+        .all() as SqlRow[]
+    ).map((row) => this.rowToResumeFact(row));
+    const versions = (
+      this.db
+        .prepare("SELECT * FROM resume_versions ORDER BY updated_at DESC, id DESC")
+        .all() as SqlRow[]
+    ).map((row) => this.rowToResumeVersion(row));
+    const verifiedFacts = facts.filter((fact) => fact.verified).length;
+    return {
+      profile: profileRow ? this.rowToResumeProfile(profileRow) : null,
+      facts,
+      versions,
+      stats: {
+        totalFacts: facts.length,
+        verifiedFacts,
+        versionCount: versions.length,
+        readyForAi: verifiedFacts > 0,
+      },
+    };
+  }
+
+  saveResumeProfile(input: ResumeProfileInput): ResumeProfileRecord {
+    const parsed = ResumeProfileInputSchema.parse(input);
+    const timestamp = new Date().toISOString();
+    this.db
+      .prepare(`
+        INSERT INTO resume_profile (
+          id, full_name, phone, email, current_city, target_roles_json,
+          summary, updated_at
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          full_name = excluded.full_name,
+          phone = excluded.phone,
+          email = excluded.email,
+          current_city = excluded.current_city,
+          target_roles_json = excluded.target_roles_json,
+          summary = excluded.summary,
+          updated_at = excluded.updated_at
+      `)
+      .run(
+        parsed.fullName,
+        parsed.phone,
+        parsed.email,
+        parsed.currentCity,
+        JSON.stringify(parsed.targetRoles),
+        parsed.summary,
+        timestamp,
+      );
+    const row = this.db
+      .prepare("SELECT * FROM resume_profile WHERE id = 1")
+      .get() as SqlRow;
+    return this.rowToResumeProfile(row);
+  }
+
+  saveResumeFact(
+    id: string | null,
+    fields: ResumeFactFields,
+  ): ResumeFactRecord {
+    const parsed = SaveResumeFactSchema.parse({
+      ...(id ? { id } : {}),
+      fields,
+    });
+    const timestamp = new Date().toISOString();
+    let factId = id;
+    if (id) {
+      const existing = this.db
+        .prepare("SELECT id FROM resume_facts WHERE id = ?")
+        .get(id);
+      if (!existing) throw new Error("简历事实不存在");
+      this.db
+        .prepare(`
+          UPDATE resume_facts SET
+            kind = ?, title = ?, organization = ?, role = ?,
+            start_date = ?, end_date = ?, location = ?, bullets_json = ?,
+            skills_json = ?, evidence = ?, verified = ?, sort_order = ?,
+            updated_at = ?
+          WHERE id = ?
+        `)
+        .run(
+          parsed.fields.kind,
+          parsed.fields.title,
+          parsed.fields.organization,
+          parsed.fields.role,
+          parsed.fields.startDate,
+          parsed.fields.endDate,
+          parsed.fields.location,
+          JSON.stringify(parsed.fields.bullets),
+          JSON.stringify(parsed.fields.skills),
+          parsed.fields.evidence,
+          parsed.fields.verified ? 1 : 0,
+          parsed.fields.sortOrder,
+          timestamp,
+          id,
+        );
+    } else {
+      const result = this.db
+        .prepare(`
+          INSERT INTO resume_facts (
+            kind, title, organization, role, start_date, end_date, location,
+            bullets_json, skills_json, evidence, verified, sort_order,
+            created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+        .run(
+          parsed.fields.kind,
+          parsed.fields.title,
+          parsed.fields.organization,
+          parsed.fields.role,
+          parsed.fields.startDate,
+          parsed.fields.endDate,
+          parsed.fields.location,
+          JSON.stringify(parsed.fields.bullets),
+          JSON.stringify(parsed.fields.skills),
+          parsed.fields.evidence,
+          parsed.fields.verified ? 1 : 0,
+          parsed.fields.sortOrder,
+          timestamp,
+          timestamp,
+        );
+      factId = String(result.lastInsertRowid);
+    }
+    const row = this.db
+      .prepare("SELECT * FROM resume_facts WHERE id = ?")
+      .get(factId) as SqlRow;
+    return this.rowToResumeFact(row);
+  }
+
+  setResumeFactVerified(id: string, verified: boolean): ResumeFactRecord {
+    const result = this.db
       .prepare(
-        "SELECT * FROM resume_facts WHERE verified = 1 ORDER BY sort_order, id",
+        "UPDATE resume_facts SET verified = ?, updated_at = ? WHERE id = ?",
       )
-      .all() as SqlRow[];
-    return { profile: profile || null, facts };
+      .run(verified ? 1 : 0, new Date().toISOString(), id);
+    if (!Number(result.changes)) throw new Error("简历事实不存在");
+    const row = this.db
+      .prepare("SELECT * FROM resume_facts WHERE id = ?")
+      .get(id) as SqlRow;
+    return this.rowToResumeFact(row);
+  }
+
+  deleteResumeFact(id: string): number {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.db
+        .prepare("DELETE FROM resume_facts WHERE id = ?")
+        .run(id);
+      if (!Number(result.changes)) {
+        this.db.exec("ROLLBACK");
+        return 0;
+      }
+      const versions = this.db
+        .prepare("SELECT id, selected_fact_ids_json FROM resume_versions")
+        .all() as SqlRow[];
+      const update = this.db.prepare(`
+        UPDATE resume_versions
+        SET selected_fact_ids_json = ?, updated_at = ?
+        WHERE id = ?
+      `);
+      for (const version of versions) {
+        const selected = JSON.parse(
+          String(version.selected_fact_ids_json || "[]"),
+        ) as string[];
+        const remaining = selected.filter((factId) => factId !== id);
+        if (remaining.length !== selected.length) {
+          update.run(
+            JSON.stringify(remaining),
+            new Date().toISOString(),
+            String(version.id),
+          );
+        }
+      }
+      this.db.exec("COMMIT");
+      return Number(result.changes);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  saveResumeVersion(
+    id: string | null,
+    fields: ResumeVersionFields,
+  ): ResumeVersionRecord {
+    const parsed = SaveResumeVersionSchema.parse({
+      ...(id ? { id } : {}),
+      fields,
+    });
+    const selectedFactIds = [...new Set(parsed.fields.selectedFactIds)];
+    if (selectedFactIds.length) {
+      const placeholders = selectedFactIds.map(() => "?").join(", ");
+      const facts = this.db
+        .prepare(
+          `SELECT id, verified FROM resume_facts WHERE id IN (${placeholders})`,
+        )
+        .all(...selectedFactIds) as SqlRow[];
+      const found = new Map(
+        facts.map((fact) => [String(fact.id), Boolean(fact.verified)]),
+      );
+      const missing = selectedFactIds.filter((factId) => !found.has(factId));
+      if (missing.length) {
+        throw new Error(`简历事实不存在：${missing.join(", ")}`);
+      }
+      if (!parsed.fields.includeUnverified) {
+        const unverified = selectedFactIds.filter(
+          (factId) => !found.get(factId),
+        );
+        if (unverified.length) {
+          throw new Error(
+            `未核实事实不能加入版本：${unverified.join(", ")}`,
+          );
+        }
+      }
+    }
+    const timestamp = new Date().toISOString();
+    let versionId = id;
+    if (id) {
+      const existing = this.db
+        .prepare("SELECT id FROM resume_versions WHERE id = ?")
+        .get(id);
+      if (!existing) throw new Error("简历版本不存在");
+      this.db
+        .prepare(`
+          UPDATE resume_versions SET
+            name = ?, target_role = ?, template = ?, summary = ?,
+            selected_fact_ids_json = ?, include_unverified = ?,
+            updated_at = ?
+          WHERE id = ?
+        `)
+        .run(
+          parsed.fields.name,
+          parsed.fields.targetRole,
+          parsed.fields.template,
+          parsed.fields.summary,
+          JSON.stringify(selectedFactIds),
+          parsed.fields.includeUnverified ? 1 : 0,
+          timestamp,
+          id,
+        );
+    } else {
+      const result = this.db
+        .prepare(`
+          INSERT INTO resume_versions (
+            name, target_role, template, summary, selected_fact_ids_json,
+            include_unverified, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+        .run(
+          parsed.fields.name,
+          parsed.fields.targetRole,
+          parsed.fields.template,
+          parsed.fields.summary,
+          JSON.stringify(selectedFactIds),
+          parsed.fields.includeUnverified ? 1 : 0,
+          timestamp,
+          timestamp,
+        );
+      versionId = String(result.lastInsertRowid);
+    }
+    const row = this.db
+      .prepare("SELECT * FROM resume_versions WHERE id = ?")
+      .get(versionId) as SqlRow;
+    return this.rowToResumeVersion(row);
+  }
+
+  deleteResumeVersion(id: string): number {
+    const result = this.db
+      .prepare("DELETE FROM resume_versions WHERE id = ?")
+      .run(id);
+    return Number(result.changes);
+  }
+
+  getResumeDocumentData(versionId: string | null = null): {
+    profile: ResumeProfileRecord | null;
+    facts: ResumeFactRecord[];
+    version: ResumeVersionRecord | null;
+  } {
+    const profileRow = this.db
+      .prepare("SELECT * FROM resume_profile WHERE id = 1")
+      .get() as SqlRow | undefined;
+    let version: ResumeVersionRecord | null = null;
+    if (versionId) {
+      const versionRow = this.db
+        .prepare("SELECT * FROM resume_versions WHERE id = ?")
+        .get(versionId) as SqlRow | undefined;
+      if (!versionRow) throw new Error("简历版本不存在");
+      version = this.rowToResumeVersion(versionRow);
+    }
+    const allFacts = (
+      this.db
+        .prepare("SELECT * FROM resume_facts ORDER BY sort_order, id")
+        .all() as SqlRow[]
+    ).map((row) => this.rowToResumeFact(row));
+    const selected = version
+      ? new Set(version.selectedFactIds)
+      : null;
+    const facts = allFacts.filter(
+      (fact) =>
+        (selected
+          ? selected.has(fact.id)
+          : true) &&
+        (version
+          ? version.includeUnverified || fact.verified
+          : fact.verified),
+    );
+    return {
+      profile: profileRow ? this.rowToResumeProfile(profileRow) : null,
+      facts,
+      version,
+    };
+  }
+
+  private rowToResumeProfile(row: SqlRow): ResumeProfileRecord {
+    return {
+      fullName: String(row.full_name || ""),
+      phone: String(row.phone || ""),
+      email: String(row.email || ""),
+      currentCity: String(row.current_city || ""),
+      targetRoles: JSON.parse(
+        String(row.target_roles_json || "[]"),
+      ) as string[],
+      summary: String(row.summary || ""),
+      updatedAt: String(row.updated_at || ""),
+    };
+  }
+
+  private rowToResumeFact(row: SqlRow): ResumeFactRecord {
+    const rawKind = String(row.kind || "");
+    const kindAliases: Record<string, ResumeFactKind> = {
+      education: "教育经历",
+      internship: "实习经历",
+      project: "项目经历",
+      skill: "技能",
+      certificate: "证书",
+      award: "奖项",
+      campus: "校园经历",
+    };
+    const kind = resumeFactKinds.includes(rawKind as ResumeFactKind)
+      ? (rawKind as ResumeFactKind)
+      : kindAliases[rawKind] || "项目经历";
+    return {
+      id: String(row.id),
+      kind,
+      title: String(row.title || ""),
+      organization: String(row.organization || ""),
+      role: String(row.role || ""),
+      startDate: String(row.start_date || ""),
+      endDate: String(row.end_date || ""),
+      location: String(row.location || ""),
+      bullets: JSON.parse(String(row.bullets_json || "[]")) as string[],
+      skills: JSON.parse(String(row.skills_json || "[]")) as string[],
+      evidence: String(row.evidence || ""),
+      verified: Boolean(row.verified),
+      sortOrder: Number(row.sort_order || 0),
+      createdAt: String(row.created_at || ""),
+      updatedAt: String(row.updated_at || ""),
+    };
+  }
+
+  private rowToResumeVersion(row: SqlRow): ResumeVersionRecord {
+    const rawTemplate = String(row.template || "general");
+    const template =
+      rawTemplate === "technical" || rawTemplate === "implementation"
+        ? rawTemplate
+        : "general";
+    return {
+      id: String(row.id),
+      name: String(row.name || ""),
+      targetRole: String(row.target_role || ""),
+      template,
+      summary: String(row.summary || ""),
+      selectedFactIds: JSON.parse(
+        String(row.selected_fact_ids_json || "[]"),
+      ) as string[],
+      includeUnverified: Boolean(row.include_unverified),
+      createdAt: String(row.created_at || ""),
+      updatedAt: String(row.updated_at || ""),
+    };
   }
 
   close() {

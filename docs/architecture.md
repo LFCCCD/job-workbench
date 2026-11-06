@@ -41,6 +41,12 @@ The first milestone proves the complete local desktop path:
 - Every AI analysis is checked against exact JD quotes and a verified `factId` allowlist.
 - Remote AI credentials are encrypted with Electron `safeStorage`; they are never stored in
   SQLite, task payloads, logs, or exported diagnostics.
+- Resume facts have an explicit verification state. AI input and default PDF versions include
+  verified facts only; unverified facts require an explicit opt-in on a version.
+- Resume versions store fact IDs rather than copied text, so updated facts are reflected in the
+  next PDF export. Deleting a fact transactionally removes its references from all versions.
+- Resume HTML and PDF rendering share one pure renderer with HTML escaping and a version-specific
+  fact selection.
 
 ## Database decision
 
@@ -51,5 +57,4 @@ to avoid native ABI rebuilds and installer packaging risk.
 ## Deferred work
 
 - Full CRM and interview records
-- Full multi-version resume editor
 - Auto update and code signing

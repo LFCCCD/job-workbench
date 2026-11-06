@@ -13,6 +13,7 @@ import { AiAnalysisService } from "./ai-service";
 import { AiSettingsService } from "./ai-settings";
 import { CollectorBrowserService } from "./collector-browser";
 import { CollectorService } from "./collector-service";
+import { renderResumeHtml } from "./resume-render";
 import {
   AiAnalysisIdSchema,
   AiAnalyzeRequestSchema,
@@ -24,6 +25,12 @@ import {
   ListJobsSchema,
   ManualJobSchema,
   PermanentDeleteSchema,
+  ResumeExportRequestSchema,
+  ResumeIdSchema,
+  ResumeProfileInputSchema,
+  ResumeVerifiedSchema,
+  SaveResumeFactSchema,
+  SaveResumeVersionSchema,
   SaveViewSchema,
   SetFavoriteSchema,
   UpdateJobSchema,
@@ -81,13 +88,13 @@ function getAiSettingsService(): AiSettingsService {
   return aiSettings;
 }
 
-function escapeHtml(value: unknown): string {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
+function safeFileName(value: string): string {
+  const cleaned = value
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
+    .replace(/[. ]+$/g, "")
+    .trim()
+    .slice(0, 120);
+  return cleaned || "求职简历";
 }
 
 function createWindow() {
@@ -238,6 +245,58 @@ function registerIpc() {
       message: deleted ? "分析记录已删除" : "分析记录不存在",
     };
   });
+  ipcMain.handle("workbench:resume-workspace", () => {
+    return getDatabase().getResumeWorkspace();
+  });
+  ipcMain.handle("workbench:save-resume-profile", (_event, input) => {
+    return getDatabase().saveResumeProfile(
+      ResumeProfileInputSchema.parse(input),
+    );
+  });
+  ipcMain.handle("workbench:save-resume-fact", (_event, input) => {
+    const id =
+      input && typeof input.id === "string" ? String(input.id) : null;
+    const parsed = SaveResumeFactSchema.parse({
+      ...(id ? { id } : {}),
+      fields: input?.fields,
+    });
+    return getDatabase().saveResumeFact(parsed.id || null, parsed.fields);
+  });
+  ipcMain.handle("workbench:set-resume-fact-verified", (_event, input) => {
+    const parsed = ResumeVerifiedSchema.parse(input);
+    return getDatabase().setResumeFactVerified(
+      parsed.id,
+      parsed.verified,
+    );
+  });
+  ipcMain.handle("workbench:delete-resume-fact", (_event, input) => {
+    const { id } = ResumeIdSchema.parse(input);
+    const deleted = getDatabase().deleteResumeFact(id);
+    return {
+      ok: true,
+      message: deleted ? "简历事实已删除" : "简历事实不存在",
+    };
+  });
+  ipcMain.handle("workbench:save-resume-version", (_event, input) => {
+    const id =
+      input && typeof input.id === "string" ? String(input.id) : null;
+    const parsed = SaveResumeVersionSchema.parse({
+      ...(id ? { id } : {}),
+      fields: input?.fields,
+    });
+    return getDatabase().saveResumeVersion(
+      parsed.id || null,
+      parsed.fields,
+    );
+  });
+  ipcMain.handle("workbench:delete-resume-version", (_event, input) => {
+    const { id } = ResumeIdSchema.parse(input);
+    const deleted = getDatabase().deleteResumeVersion(id);
+    return {
+      ok: true,
+      message: deleted ? "简历版本已删除" : "简历版本不存在",
+    };
+  });
   ipcMain.handle("workbench:cancel-task", (_event, id) => {
     return getTaskService().cancel(String(id));
   });
@@ -301,54 +360,48 @@ function registerIpc() {
     if (confirmation.response !== 1) return null;
     return database.restoreBackup(preview.sourcePath);
   });
-  ipcMain.handle("workbench:export-resume", async () => {
-    if (!mainWindow) return null;
-    const { profile, facts } = getDatabase().getResumeDocumentData();
-    if (!profile) throw new Error("数据库中还没有个人资料");
-    const sections = facts
-      .map((fact) => {
-        const bullets = JSON.parse(String(fact.bullets_json || "[]")) as string[];
-        return `<section><h2>${escapeHtml(fact.kind)}</h2><h3>${escapeHtml(
-          fact.title,
-        )}</h3><p>${escapeHtml(fact.organization)} ${escapeHtml(
-          fact.role,
-        )}</p><ul>${bullets
-          .map((bullet) => `<li>${escapeHtml(bullet)}</li>`)
-          .join("")}</ul></section>`;
-      })
-      .join("");
-    const html = `<!doctype html><html><head><meta charset="utf-8"><style>
-      body{font-family:"Microsoft YaHei",sans-serif;color:#172a30;padding:44px;line-height:1.65}
-      h1{font-size:28px;margin:0 0 4px}h2{font-size:16px;border-bottom:1px solid #d8e4e3;padding-bottom:4px;margin-top:24px}
-      h3{font-size:15px;margin-bottom:2px}p{color:#53666c}ul{margin-top:5px}
-    </style></head><body><h1>${escapeHtml(
-      profile.full_name,
-    )}</h1><p>${escapeHtml(profile.phone)} · ${escapeHtml(
-      profile.email,
-    )} · ${escapeHtml(profile.current_city)}</p>${sections}</body></html>`;
-    const pdfWindow = new BrowserWindow({
-      show: false,
-      webPreferences: { sandbox: true },
-    });
-    await pdfWindow.loadURL(
-      `data:text/html;charset=utf-8,${encodeURIComponent(html)}`,
-    );
-    const pdf = await pdfWindow.webContents.printToPDF({
-      printBackground: true,
-      pageSize: "A4",
-    });
-    pdfWindow.destroy();
+  ipcMain.handle(
+    "workbench:export-resume",
+    async (_event, rawInput?: unknown) => {
+      if (!mainWindow) return null;
+      const { versionId } = ResumeExportRequestSchema.parse(rawInput || {});
+      const { profile, facts, version } =
+        getDatabase().getResumeDocumentData(versionId);
+      if (!profile) throw new Error("数据库中还没有个人资料");
+      if (!profile.fullName.trim()) throw new Error("请先填写姓名");
+      if (!facts.length) throw new Error("当前简历版本没有可导出的事实");
+      const html = renderResumeHtml({ profile, facts, version });
+      const pdfWindow = new BrowserWindow({
+        show: false,
+        webPreferences: { sandbox: true },
+      });
+      let pdf: Buffer;
+      try {
+        await pdfWindow.loadURL(
+          `data:text/html;charset=utf-8,${encodeURIComponent(html)}`,
+        );
+        pdf = await pdfWindow.webContents.printToPDF({
+          printBackground: true,
+          pageSize: "A4",
+        });
+      } finally {
+        pdfWindow.destroy();
+      }
 
-    const save = await dialog.showSaveDialog(mainWindow, {
-      title: "保存简历 PDF",
-      defaultPath: path.join(app.getPath("documents"), "求职简历.pdf"),
-      filters: [{ name: "PDF", extensions: ["pdf"] }],
-    });
-    if (save.canceled || !save.filePath) return null;
-    const fs = await import("node:fs/promises");
-    await fs.writeFile(save.filePath, pdf);
-    return save.filePath;
-  });
+      const save = await dialog.showSaveDialog(mainWindow, {
+        title: "保存简历 PDF",
+        defaultPath: path.join(
+          app.getPath("documents"),
+          `${safeFileName(version?.name || "求职简历")}.pdf`,
+        ),
+        filters: [{ name: "PDF", extensions: ["pdf"] }],
+      });
+      if (save.canceled || !save.filePath) return null;
+      const fs = await import("node:fs/promises");
+      await fs.writeFile(save.filePath, pdf);
+      return save.filePath;
+    },
+  );
 }
 
 app.whenReady().then(() => {

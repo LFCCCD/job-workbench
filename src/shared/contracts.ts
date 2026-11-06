@@ -237,6 +237,89 @@ export const AiAnalysisIdSchema = z.object({
   id: z.string().min(1).max(500),
 });
 
+export const resumeFactKinds = [
+  "教育经历",
+  "实习经历",
+  "项目经历",
+  "技能",
+  "证书",
+  "奖项",
+  "校园经历",
+] as const;
+
+export const ResumeProfileInputSchema = z
+  .object({
+    fullName: z.string().trim().min(1, "姓名不能为空").max(100),
+    phone: z.string().trim().max(50).default(""),
+    email: z.string().trim().max(200).default(""),
+    currentCity: z.string().trim().max(100).default(""),
+    targetRoles: z.array(z.string().trim().min(1).max(100)).max(10).default([]),
+    summary: z.string().trim().max(5_000).default(""),
+  })
+  .strict();
+
+export const SaveResumeFactSchema = z
+  .object({
+    id: z.string().min(1).max(100).optional(),
+    fields: z
+      .object({
+        kind: z.enum(resumeFactKinds),
+        title: z.string().trim().min(1, "事实标题不能为空").max(200),
+        organization: z.string().trim().max(200).default(""),
+        role: z.string().trim().max(200).default(""),
+        startDate: z.string().trim().max(30).default(""),
+        endDate: z.string().trim().max(30).default(""),
+        location: z.string().trim().max(100).default(""),
+        bullets: z
+          .array(z.string().trim().min(1).max(1_000))
+          .max(20)
+          .default([]),
+        skills: z
+          .array(z.string().trim().min(1).max(100))
+          .max(30)
+          .default([]),
+        evidence: z.string().trim().max(5_000).default(""),
+        verified: z.boolean().default(false),
+        sortOrder: z.number().int().min(-10_000).max(10_000).default(0),
+      })
+      .strict(),
+  })
+  .strict();
+
+export const SaveResumeVersionSchema = z
+  .object({
+    id: z.string().min(1).max(100).optional(),
+    fields: z
+      .object({
+        name: z.string().trim().min(1, "版本名称不能为空").max(200),
+        targetRole: z.string().trim().max(200).default(""),
+        template: z.enum(["general", "technical", "implementation"]).default(
+          "general",
+        ),
+        summary: z.string().trim().max(5_000).default(""),
+        selectedFactIds: z
+          .array(z.string().min(1).max(100))
+          .max(100)
+          .default([]),
+        includeUnverified: z.boolean().default(false),
+      })
+      .strict(),
+  })
+  .strict();
+
+export const ResumeIdSchema = z.object({
+  id: z.string().min(1).max(100),
+});
+
+export const ResumeVerifiedSchema = z.object({
+  id: z.string().min(1).max(100),
+  verified: z.boolean(),
+});
+
+export const ResumeExportRequestSchema = z.object({
+  versionId: z.string().min(1).max(100).nullable().default(null),
+});
+
 export type JobStatus = z.infer<typeof JobStatusSchema>;
 export type ManualJobInput = z.infer<typeof ManualJobSchema>;
 export type MigrationResult = z.infer<typeof MigrationResultSchema>;
@@ -251,6 +334,14 @@ export type AiEvidence = z.infer<typeof AiEvidenceSchema>;
 export type AiAnalysisResult = z.infer<typeof AiAnalysisResultSchema>;
 export type AiSettingsInput = z.infer<typeof AiSettingsInputSchema>;
 export type AiAnalyzeRequest = z.infer<typeof AiAnalyzeRequestSchema>;
+export type ResumeFactKind = (typeof resumeFactKinds)[number];
+export type ResumeProfileInput = z.infer<typeof ResumeProfileInputSchema>;
+export type ResumeFactFields = z.infer<
+  typeof SaveResumeFactSchema
+>["fields"];
+export type ResumeVersionFields = z.infer<
+  typeof SaveResumeVersionSchema
+>["fields"];
 
 export interface JobRecord {
   id: string;
@@ -414,6 +505,58 @@ export interface AiUsageSummary {
   cachedHits: number;
 }
 
+export interface ResumeProfileRecord {
+  fullName: string;
+  phone: string;
+  email: string;
+  currentCity: string;
+  targetRoles: string[];
+  summary: string;
+  updatedAt: string;
+}
+
+export interface ResumeFactRecord {
+  id: string;
+  kind: ResumeFactKind;
+  title: string;
+  organization: string;
+  role: string;
+  startDate: string;
+  endDate: string;
+  location: string;
+  bullets: string[];
+  skills: string[];
+  evidence: string;
+  verified: boolean;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ResumeVersionRecord {
+  id: string;
+  name: string;
+  targetRole: string;
+  template: "general" | "technical" | "implementation";
+  summary: string;
+  selectedFactIds: string[];
+  includeUnverified: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ResumeWorkspace {
+  profile: ResumeProfileRecord | null;
+  facts: ResumeFactRecord[];
+  versions: ResumeVersionRecord[];
+  stats: {
+    totalFacts: number;
+    verifiedFacts: number;
+    versionCount: number;
+    readyForAi: boolean;
+  };
+}
+
 export type TaskStatus =
   | "queued"
   | "running"
@@ -472,10 +615,23 @@ export interface JobWorkbenchApi {
   listAiAnalyses(limit?: number): Promise<AiAnalysisRecord[]>;
   getAiUsage(): Promise<AiUsageSummary>;
   deleteAiAnalysis(id: string): Promise<OperationResult>;
+  getResumeWorkspace(): Promise<ResumeWorkspace>;
+  saveResumeProfile(input: ResumeProfileInput): Promise<ResumeProfileRecord>;
+  saveResumeFact(
+    id: string | null,
+    fields: ResumeFactFields,
+  ): Promise<ResumeFactRecord>;
+  setResumeFactVerified(id: string, verified: boolean): Promise<ResumeFactRecord>;
+  deleteResumeFact(id: string): Promise<OperationResult>;
+  saveResumeVersion(
+    id: string | null,
+    fields: ResumeVersionFields,
+  ): Promise<ResumeVersionRecord>;
+  deleteResumeVersion(id: string): Promise<OperationResult>;
   cancelTask(id: string): Promise<TaskRecord>;
   retryTask(id: string): Promise<TaskRecord>;
   clearFinishedTasks(): Promise<OperationResult>;
-  exportResumePdf(): Promise<string | null>;
+  exportResumePdf(versionId?: string | null): Promise<string | null>;
 }
 
 export type JobRecordUpdate = z.infer<typeof UpdateJobSchema>["fields"];

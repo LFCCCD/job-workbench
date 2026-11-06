@@ -8,6 +8,9 @@ import type {
   JobWorkbenchApi,
   ManualJobInput,
   JobRecordUpdate,
+  ResumeFactFields,
+  ResumeProfileInput,
+  ResumeVersionFields,
 } from "../shared/contracts";
 
 const api: JobWorkbenchApi = {
@@ -68,12 +71,29 @@ const api: JobWorkbenchApi = {
   getAiUsage: () => ipcRenderer.invoke("workbench:ai-usage"),
   deleteAiAnalysis: (id: string) =>
     ipcRenderer.invoke("workbench:delete-ai-analysis", { id }),
+  getResumeWorkspace: () => ipcRenderer.invoke("workbench:resume-workspace"),
+  saveResumeProfile: (input: ResumeProfileInput) =>
+    ipcRenderer.invoke("workbench:save-resume-profile", input),
+  saveResumeFact: (id: string | null, fields: ResumeFactFields) =>
+    ipcRenderer.invoke("workbench:save-resume-fact", { id, fields }),
+  setResumeFactVerified: (id: string, verified: boolean) =>
+    ipcRenderer.invoke("workbench:set-resume-fact-verified", {
+      id,
+      verified,
+    }),
+  deleteResumeFact: (id: string) =>
+    ipcRenderer.invoke("workbench:delete-resume-fact", { id }),
+  saveResumeVersion: (id: string | null, fields: ResumeVersionFields) =>
+    ipcRenderer.invoke("workbench:save-resume-version", { id, fields }),
+  deleteResumeVersion: (id: string) =>
+    ipcRenderer.invoke("workbench:delete-resume-version", { id }),
   cancelTask: (id: string) =>
     ipcRenderer.invoke("workbench:cancel-task", id),
   retryTask: (id: string) => ipcRenderer.invoke("workbench:retry-task", id),
   clearFinishedTasks: () =>
     ipcRenderer.invoke("workbench:clear-finished-tasks"),
-  exportResumePdf: () => ipcRenderer.invoke("workbench:export-resume"),
+  exportResumePdf: (versionId: string | null = null) =>
+    ipcRenderer.invoke("workbench:export-resume", { versionId }),
 };
 
 contextBridge.exposeInMainWorld("jobWorkbench", api);

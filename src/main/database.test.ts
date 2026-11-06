@@ -324,6 +324,99 @@ describe("JobDatabase", () => {
     }
   });
 
+  it("manages resume facts and only includes verified facts by default", () => {
+    const root = createRoot();
+    const database = new JobDatabase(root);
+    try {
+      const profile = database.saveResumeProfile({
+        fullName: "测试同学",
+        phone: "13800000000",
+        email: "test@example.com",
+        currentCity: "杭州",
+        targetRoles: ["软件实施工程师", "技术支持工程师"],
+        summary: "计算机本科，可立即到岗。",
+      });
+      expect(profile.fullName).toBe("测试同学");
+
+      const verifiedFact = database.saveResumeFact(null, {
+        kind: "项目经历",
+        title: "电力设备采购平台",
+        organization: "华北电力大学",
+        role: "后端开发",
+        startDate: "2025-09",
+        endDate: "2026-05",
+        location: "北京",
+        bullets: ["完成设备查询和采购流程接口"],
+        skills: ["Java", "MySQL"],
+        evidence: "毕业设计源文件和论文",
+        verified: true,
+        sortOrder: 10,
+      });
+      const unverifiedFact = database.saveResumeFact(null, {
+        kind: "实习经历",
+        title: "数据整理实习",
+        organization: "示例单位",
+        role: "实习生",
+        startDate: "2025-07",
+        endDate: "2025-08",
+        location: "丽水",
+        bullets: ["整理业务数据"],
+        skills: ["Excel"],
+        evidence: "",
+        verified: false,
+        sortOrder: 20,
+      });
+      expect(database.getResumeWorkspace()).toMatchObject({
+        stats: {
+          totalFacts: 2,
+          verifiedFacts: 1,
+          readyForAi: true,
+        },
+      });
+
+      expect(() =>
+        database.saveResumeVersion(null, {
+          name: "实施岗位版",
+          targetRole: "软件实施工程师",
+          template: "implementation",
+          summary: "突出项目和交付能力。",
+          selectedFactIds: [verifiedFact.id, unverifiedFact.id],
+          includeUnverified: false,
+        }),
+      ).toThrow("未核实事实不能加入版本");
+
+      const version = database.saveResumeVersion(null, {
+        name: "实施岗位版",
+        targetRole: "软件实施工程师",
+        template: "implementation",
+        summary: "突出项目和交付能力。",
+        selectedFactIds: [verifiedFact.id],
+        includeUnverified: false,
+      });
+      expect(database.getResumeDocumentData(version.id).facts).toHaveLength(1);
+
+      expect(
+        database.setResumeFactVerified(unverifiedFact.id, true).verified,
+      ).toBe(true);
+      database.saveResumeVersion(version.id, {
+        name: "实施岗位版",
+        targetRole: "软件实施工程师",
+        template: "implementation",
+        summary: "突出项目和交付能力。",
+        selectedFactIds: [verifiedFact.id, unverifiedFact.id],
+        includeUnverified: false,
+      });
+      expect(database.getResumeDocumentData(version.id).facts).toHaveLength(2);
+
+      expect(database.deleteResumeFact(verifiedFact.id)).toBe(1);
+      expect(
+        database.getResumeWorkspace().versions[0].selectedFactIds,
+      ).toEqual([unverifiedFact.id]);
+    } finally {
+      database.close();
+    }
+  });
+
   it("persists tasks, resumes queued work and clears finished records", async () => {
     const root = createRoot();
     const database = new JobDatabase(root);

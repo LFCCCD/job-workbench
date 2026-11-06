@@ -235,6 +235,86 @@ async function main() {
         `AI credential storage failed: ${JSON.stringify(credentialCheck)}`,
       );
     }
+    await page.locator("nav").getByRole("button", { name: "简历" }).click();
+    const profilePanel = page.locator(".resume-profile-panel");
+    await profilePanel.getByLabel("姓名").fill("冒烟同学");
+    await profilePanel.getByLabel("当前城市").fill("杭州");
+    await profilePanel
+      .getByLabel("目标岗位（用顿号或逗号分隔）")
+      .fill("软件实施工程师、技术支持工程师");
+    await page
+      .locator(".top-actions")
+      .getByRole("button", { name: "保存个人资料" })
+      .click();
+    await page
+      .locator(".top-actions")
+      .getByRole("button", { name: "新建事实" })
+      .click();
+    const factModal = page.locator(".resume-fact-modal");
+    await factModal
+      .getByLabel("标题")
+      .fill("电力设备采购平台二次开发");
+    await factModal.getByLabel("组织 / 学校 / 公司").fill("华北电力大学");
+    await factModal.getByLabel("角色").fill("后端开发");
+    await factModal.getByLabel("开始时间").fill("2025-09");
+    await factModal.getByLabel("结束时间").fill("2026-05");
+    await factModal.getByLabel("地点").fill("北京");
+    await factModal
+      .getByLabel("事实条目（每行一条，只写真实完成的内容）")
+      .fill("完成设备查询接口\n完成采购流程状态管理");
+    await factModal.getByLabel("技能（用逗号分隔）").fill("Java、MySQL");
+    await factModal
+      .getByLabel("真实依据")
+      .fill("毕业设计源文件和论文");
+    await factModal
+      .getByLabel("我已确认这条事实真实、准确并能解释")
+      .check();
+    await factModal.getByRole("button", { name: "保存事实" }).click();
+    await page.waitForSelector("text=电力设备采购平台二次开发");
+    await page
+      .locator(".top-actions")
+      .getByRole("button", { name: "新建版本" })
+      .click();
+    const versionModal = page.locator(".resume-version-modal");
+    await versionModal
+      .getByLabel("版本名称")
+      .fill("软件实施岗位版");
+    await versionModal
+      .getByLabel("目标岗位")
+      .fill("软件实施工程师");
+    await versionModal
+      .getByLabel("版本概述")
+      .fill("突出系统实施、数据库基础和项目交付能力。");
+    await versionModal.getByRole("button", { name: "保存版本" }).click();
+    await page.waitForSelector("text=软件实施岗位版");
+    await page.screenshot({
+      path: path.join(__dirname, "..", "artifacts", "smoke-resume.png"),
+      fullPage: true,
+    });
+    const resumePdfPath = path.join(userData, "resume-smoke.pdf");
+    await app.evaluate(({ dialog }, filePath) => {
+      dialog.showSaveDialog = async () => ({
+        canceled: false,
+        filePath,
+      });
+    }, resumePdfPath);
+    await page
+      .locator(".active-resume-version")
+      .getByRole("button", { name: "导出 PDF" })
+      .click();
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      if (fs.existsSync(resumePdfPath)) break;
+      await page.waitForTimeout(100);
+    }
+    if (!fs.existsSync(resumePdfPath)) {
+      throw new Error("Resume PDF was not created");
+    }
+    const pdfBytes = fs.readFileSync(resumePdfPath);
+    if (pdfBytes.subarray(0, 5).toString() !== "%PDF-") {
+      throw new Error("Resume export did not produce a valid PDF header");
+    }
+    await page.locator("nav").getByRole("button", { name: "AI 分析" }).click();
+    await page.waitForSelector("text=PROVIDER SETTINGS");
     await page
       .locator(".top-actions")
       .getByRole("button", { name: "开始分析" })
