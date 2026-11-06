@@ -12,6 +12,18 @@ Windows 本地求职管理工具。当前实现为 M1 垂直切片，已打通�
 
 当前版本是技术验证版，不包含 BOSS 自动采集、AI 分析和完整 CRM。
 
+## 下载
+
+[Windows x64 M1 安装程序](https://github.com/LFCCCD/job-workbench/releases/download/v0.1.0-m1/Setup.0.1.0.exe)
+
+SHA256：
+
+```text
+E1D1F3DC3CF45557FF0C04B2AD7FD6D6BA0C0EC081F61E8F768A9D7B151A4D62
+```
+
+当前安装包未签名，Windows 可能显示 SmartScreen 提示。
+
 ## 开发
 
 ```powershell
