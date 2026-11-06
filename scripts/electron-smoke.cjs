@@ -322,22 +322,10 @@ async function main() {
     ) {
       throw new Error(`Health check failed: ${JSON.stringify(healthCheck)}`);
     }
-    await page
-      .locator(".system-updates")
-      .getByRole("button", { name: "检查更新" })
-      .click();
-    await page.waitForSelector("text=v0.3.0-m3");
-    const updateHealth = await page.evaluate(() =>
-      window.jobWorkbench.getSystemHealth(),
-    );
-    if (
-      !updateHealth.updateInfo?.available ||
-      updateHealth.updateInfo.latestTag !== "v0.3.0-m3"
-    ) {
-      throw new Error(
-        `Update check failed: ${JSON.stringify(updateHealth.updateInfo)}`,
-      );
-    }
+    await page.screenshot({
+      path: path.join(__dirname, "..", "artifacts", "smoke-health.png"),
+      fullPage: true,
+    });
     const diagnosticsPath = path.join(userData, "diagnostics-smoke.json");
     await app.evaluate(({ dialog }, filePath) => {
       dialog.showSaveDialog = async () => ({
@@ -365,6 +353,34 @@ async function main() {
     ) {
       throw new Error("Diagnostics report was not safely redacted");
     }
+    const sidebarBox = await page.locator(".sidebar").boundingBox();
+    const gearBox = await page.locator(".settings-gear").boundingBox();
+    if (
+      !sidebarBox ||
+      !gearBox ||
+      gearBox.x < sidebarBox.x ||
+      gearBox.y < sidebarBox.y + sidebarBox.height * 0.6
+    ) {
+      throw new Error("Settings gear is not positioned at bottom-left");
+    }
+    await page.locator(".settings-gear").click();
+    await page.waitForSelector("text=APPLICATION SETTINGS");
+    await page
+      .locator(".system-updates")
+      .getByRole("button", { name: "检查更新" })
+      .click();
+    await page.waitForSelector("text=v0.3.0-m3");
+    const updateHealth = await page.evaluate(() =>
+      window.jobWorkbench.getSystemHealth(),
+    );
+    if (
+      !updateHealth.updateInfo?.available ||
+      updateHealth.updateInfo.latestTag !== "v0.3.0-m3"
+    ) {
+      throw new Error(
+        `Update check failed: ${JSON.stringify(updateHealth.updateInfo)}`,
+      );
+    }
     await app.evaluate(({ BrowserWindow }) => {
       BrowserWindow.getAllWindows()[0]?.close();
     });
@@ -381,7 +397,7 @@ async function main() {
     });
     await page.waitForTimeout(200);
     await page.screenshot({
-      path: path.join(__dirname, "..", "artifacts", "smoke-health.png"),
+      path: path.join(__dirname, "..", "artifacts", "smoke-settings.png"),
       fullPage: true,
     });
     await page.locator("nav").getByRole("button", { name: "AI 分析" }).click();

@@ -50,12 +50,12 @@ Windows 本地求职管理工具。当前 `feat/m2-data-core` 分支已打通：
 
 ## 下载
 
-[Windows x64 M2 Beta 安装程序](https://github.com/LFCCCD/job-workbench/releases/download/v0.2.0-m2/Setup.0.2.0-m2.exe)
+[Windows x64 M2 Beta 安装程序](https://github.com/LFCCCD/job-workbench/releases/download/v0.2.1-m2/Setup.0.2.1-m2.exe)
 
 SHA256：
 
 ```text
-AACF6A3003DFCE87B25F102A75CC07F2352DEB2E59CE6DBAC6AD66CBF6D10CAF
+E854B7A2AD27146740CF9F0C81A668CB4E1779759223326F8D90A5C86331183A
 ```
 
 当前安装包未签名，Windows 可能显示 SmartScreen 提示。
@@ -83,7 +83,7 @@ npm run dist
 
 构建产物：
 
-`release/求职工作台 Setup 0.2.0-m2.exe`
+`release/求职工作台 Setup 0.2.1-m2.exe`
 
 ## 本地数据
 
@@ -155,7 +155,7 @@ AI 分析和 PDF 导出共用同一事实库，但远程 AI 只接收已核实�
 提醒状态。诊断报告为脱敏 JSON，只包含版本、运行环境、状态、数量和脱敏后的日志；
 不会包含 API Key、Cookie、联系人、简历正文、招聘聊天或完整岗位描述。
 
-安装版可以在“系统 → 启动与更新”中开启 Windows 登录自启。更新检查默认每 6
+安装版可以点击左下角齿轮进入“设置”，开启 Windows 登录自启。更新检查默认每 6
 小时最多请求一次公开 Release；只打开发布页面或下载链接，不会自动执行安装包。
 当前安装包没有代码签名证书，Windows 可能显示 SmartScreen 提示。
 

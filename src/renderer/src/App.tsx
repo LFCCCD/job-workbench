@@ -117,6 +117,11 @@ const viewCopy = {
     title: "系统",
     description: "托盘、通知、健康检查、备份与脱敏诊断",
   },
+  settings: {
+    eyebrow: "APPLICATION SETTINGS",
+    title: "设置",
+    description: "启动方式、系统通知和更新策略",
+  },
   tasks: {
     eyebrow: "TASK CENTER",
     title: "任务中心",
@@ -296,7 +301,14 @@ function eventLabel(eventType: string): string {
 
 export function App() {
   const [view, setView] = useState<
-    "jobs" | "collector" | "ai" | "resume" | "followup" | "system" | "tasks"
+    | "jobs"
+    | "collector"
+    | "ai"
+    | "resume"
+    | "followup"
+    | "system"
+    | "settings"
+    | "tasks"
   >("jobs");
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [jobs, setJobs] = useState<JobRecord[]>([]);
@@ -1181,6 +1193,11 @@ export function App() {
     setView("system");
   }
 
+  async function openSettingsPage() {
+    await refreshSystemHealth();
+    setView("settings");
+  }
+
   async function setNotificationsEnabled(enabled: boolean) {
     await runOperation(async () => {
       const result = await window.jobWorkbench.setNotificationsEnabled(enabled);
@@ -1376,9 +1393,20 @@ export function App() {
             系统
           </button>
         </nav>
-        <div className="sidebar-status">
-          <span className="dot" />
-          Schema v{dashboard?.schemaVersion ?? "-"} · 本地连接
+        <div className="sidebar-footer">
+          <button
+            className={`settings-gear ${
+              view === "settings" ? "active" : ""
+            }`}
+            onClick={() => void openSettingsPage()}
+          >
+            <span aria-hidden="true">⚙</span>
+            设置
+          </button>
+          <div className="sidebar-status">
+            <span className="dot" />
+            Schema v{dashboard?.schemaVersion ?? "-"} · 本地连接
+          </div>
         </div>
       </aside>
 
@@ -1554,6 +1582,22 @@ export function App() {
                   disabled={busy}
                 >
                   导出诊断报告
+                </button>
+              </>
+            ) : view === "settings" ? (
+              <>
+                <button
+                  onClick={() => void runReminderCheck()}
+                  disabled={busy}
+                >
+                  测试到期提醒
+                </button>
+                <button
+                  className="primary"
+                  onClick={() => void checkForUpdates()}
+                  disabled={busy}
+                >
+                  检查更新
                 </button>
               </>
             ) : (
@@ -3490,65 +3534,25 @@ export function App() {
           </div>
         </section>
 
-        <section hidden={view !== "system"} className="system-center">
-          <section
-            className={`health-hero health-${systemHealth?.overall || "warning"}`}
-          >
-            <div>
-              <p className="eyebrow">HEALTH SUMMARY</p>
-              <h2>
-                {systemHealth?.overall === "ok"
-                  ? "系统运行正常"
-                  : systemHealth?.overall === "error"
-                    ? "发现需要处理的问题"
-                    : "系统可用，有可优化项"}
-              </h2>
-              <p>
-                数据库、后台任务和本地数据可继续使用；提醒与采集连接状态如下。
-              </p>
-            </div>
-            <div className="health-version">
-              <span>应用版本</span>
-              <strong>v{systemHealth?.appVersion || "-"}</strong>
-              <small>
-                运行 {Math.floor((systemHealth?.uptimeSeconds || 0) / 60)} 分钟
-              </small>
-            </div>
-          </section>
-
-          <section className="health-check-grid">
-            {(systemHealth?.checks || []).map((check) => (
-              <article
-                className={`health-check check-${check.status}`}
-                key={check.id}
-              >
-                <div>
-                  <span className="health-dot" />
-                  <strong>{check.label}</strong>
-                </div>
-                <p>{check.detail}</p>
-              </article>
-            ))}
-          </section>
-
-          <div className="system-columns">
-            <section className="panel system-settings">
-              <div className="system-section-head">
-                <div>
-                  <p className="eyebrow">NOTIFICATIONS & TRAY</p>
-                  <h2>提醒与托盘</h2>
-                  <p className="muted">
-                    关闭窗口后应用保留在托盘，到期跟进每天最多提醒一次。
-                  </p>
-                </div>
-                <span
-                  className={`status-badge ${
-                    systemHealth?.trayActive ? "" : "muted-badge"
-                  }`}
-                >
-                  托盘{systemHealth?.trayActive ? "已启用" : "未启用"}
-                </span>
+        <section hidden={view !== "settings"} className="settings-center">
+          <section className="panel settings-panel">
+            <div className="system-section-head">
+              <div>
+                <p className="eyebrow">NOTIFICATIONS & TRAY</p>
+                <h2>提醒与托盘</h2>
+                <p className="muted">
+                  关闭窗口后应用保留在托盘，到期跟进每天最多提醒一次。
+                </p>
               </div>
+              <span
+                className={`status-badge ${
+                  systemHealth?.trayActive ? "" : "muted-badge"
+                }`}
+              >
+                托盘{systemHealth?.trayActive ? "已启用" : "未启用"}
+              </span>
+            </div>
+            <div className="settings-toggle-grid">
               <label className="system-toggle">
                 <input
                   type="checkbox"
@@ -3567,73 +3571,6 @@ export function App() {
                   </small>
                 </span>
               </label>
-              <div className="system-actions">
-                <button
-                  onClick={() => void runReminderCheck()}
-                  disabled={busy}
-                >
-                  立即检查到期跟进
-                </button>
-                <button
-                  onClick={() => void openDataDirectory()}
-                  disabled={busy}
-                >
-                  打开数据目录
-                </button>
-                <button
-                  className="primary"
-                  onClick={() => void exportDiagnostics()}
-                  disabled={busy}
-                >
-                  导出脱敏诊断报告
-                </button>
-              </div>
-              <p className="system-privacy">
-                诊断报告不包含 API Key、Cookie、联系人、简历正文、招聘聊天或完整 JD。
-              </p>
-            </section>
-
-            <section className="panel system-status-panel">
-              <p className="eyebrow">LOCAL STATUS</p>
-              <h2>本地状态</h2>
-              <dl className="system-facts">
-                <dt>Schema</dt>
-                <dd>v{systemHealth?.schemaVersion ?? "-"}</dd>
-                <dt>数据库完整性</dt>
-                <dd>{systemHealth?.databaseIntegrity || "-"}</dd>
-                <dt>待处理任务</dt>
-                <dd>{systemHealth?.pendingTasks ?? 0}</dd>
-                <dt>候选预览</dt>
-                <dd>{systemHealth?.pendingCandidates ?? 0}</dd>
-                <dt>未完成跟进</dt>
-                <dd>{systemHealth?.dueFollowUps ?? 0}</dd>
-                <dt>专用 Edge</dt>
-                <dd>{systemHealth?.edgeRunning ? "已连接" : "未连接"}</dd>
-                <dt>AI Provider</dt>
-                <dd>
-                  {systemHealth?.aiProvider || "-"} ·{" "}
-                  {systemHealth?.aiConfigured ? "可用" : "待配置"}
-                </dd>
-              </dl>
-            </section>
-          </div>
-
-          <section className="panel system-updates">
-            <div className="system-section-head">
-              <div>
-                <p className="eyebrow">STARTUP & UPDATES</p>
-                <h2>启动与更新</h2>
-                <p className="muted">
-                  开机自启需要在安装版中开启；更新只检查版本并打开下载页面。
-                </p>
-              </div>
-              <span className="status-badge">
-                {systemHealth?.updateInfo?.available
-                  ? `发现 ${systemHealth.updateInfo.latestTag}`
-                  : "手动更新"}
-              </span>
-            </div>
-            <div className="startup-grid">
               <label className="system-toggle">
                 <input
                   type="checkbox"
@@ -3666,6 +3603,34 @@ export function App() {
                   <small>最多每 6 小时检查一次</small>
                 </span>
               </label>
+            </div>
+            <div className="system-actions">
+              <button onClick={() => void runReminderCheck()} disabled={busy}>
+                测试到期提醒
+              </button>
+              <button
+                onClick={() => void openDataDirectory()}
+                disabled={busy}
+              >
+                打开数据目录
+              </button>
+            </div>
+          </section>
+
+          <section className="panel system-updates settings-panel">
+            <div className="system-section-head">
+              <div>
+                <p className="eyebrow">UPDATES</p>
+                <h2>应用更新</h2>
+                <p className="muted">
+                  更新只检查版本并打开下载页面，不会静默下载或覆盖安装。
+                </p>
+              </div>
+              <span className="status-badge">
+                {systemHealth?.updateInfo?.available
+                  ? `发现 ${systemHealth.updateInfo.latestTag}`
+                  : "当前版本"}
+              </span>
             </div>
             <div className="update-card">
               <div>
@@ -3725,6 +3690,110 @@ export function App() {
               提示。代码签名不会用自签名证书冒充正式签名。
             </p>
           </section>
+        </section>
+
+        <section hidden={view !== "system"} className="system-center">
+          <section
+            className={`health-hero health-${systemHealth?.overall || "warning"}`}
+          >
+            <div>
+              <p className="eyebrow">HEALTH SUMMARY</p>
+              <h2>
+                {systemHealth?.overall === "ok"
+                  ? "系统运行正常"
+                  : systemHealth?.overall === "error"
+                    ? "发现需要处理的问题"
+                    : "系统可用，有可优化项"}
+              </h2>
+              <p>
+                数据库、后台任务和本地数据可继续使用；提醒与采集连接状态如下。
+              </p>
+            </div>
+            <div className="health-version">
+              <span>应用版本</span>
+              <strong>v{systemHealth?.appVersion || "-"}</strong>
+              <small>
+                运行 {Math.floor((systemHealth?.uptimeSeconds || 0) / 60)} 分钟
+              </small>
+            </div>
+          </section>
+
+          <section className="health-check-grid">
+            {(systemHealth?.checks || []).map((check) => (
+              <article
+                className={`health-check check-${check.status}`}
+                key={check.id}
+              >
+                <div>
+                  <span className="health-dot" />
+                  <strong>{check.label}</strong>
+                </div>
+                <p>{check.detail}</p>
+              </article>
+            ))}
+          </section>
+
+          <div className="system-columns">
+            <section className="panel system-settings">
+              <div className="system-section-head">
+                <div>
+                  <p className="eyebrow">DIAGNOSTICS & DATA</p>
+                  <h2>诊断与数据</h2>
+                  <p className="muted">
+                    检查到期提醒、打开本地数据目录或导出脱敏诊断报告。
+                  </p>
+                </div>
+              </div>
+              <div className="system-actions">
+                <button
+                  onClick={() => void runReminderCheck()}
+                  disabled={busy}
+                >
+                  立即检查到期跟进
+                </button>
+                <button
+                  onClick={() => void openDataDirectory()}
+                  disabled={busy}
+                >
+                  打开数据目录
+                </button>
+                <button
+                  className="primary"
+                  onClick={() => void exportDiagnostics()}
+                  disabled={busy}
+                >
+                  导出脱敏诊断报告
+                </button>
+              </div>
+              <p className="system-privacy">
+                诊断报告不包含 API Key、Cookie、联系人、简历正文、招聘聊天或完整 JD。
+              </p>
+            </section>
+
+            <section className="panel system-status-panel">
+              <p className="eyebrow">LOCAL STATUS</p>
+              <h2>本地状态</h2>
+              <dl className="system-facts">
+                <dt>Schema</dt>
+                <dd>v{systemHealth?.schemaVersion ?? "-"}</dd>
+                <dt>数据库完整性</dt>
+                <dd>{systemHealth?.databaseIntegrity || "-"}</dd>
+                <dt>待处理任务</dt>
+                <dd>{systemHealth?.pendingTasks ?? 0}</dd>
+                <dt>候选预览</dt>
+                <dd>{systemHealth?.pendingCandidates ?? 0}</dd>
+                <dt>未完成跟进</dt>
+                <dd>{systemHealth?.dueFollowUps ?? 0}</dd>
+                <dt>专用 Edge</dt>
+                <dd>{systemHealth?.edgeRunning ? "已连接" : "未连接"}</dd>
+                <dt>AI Provider</dt>
+                <dd>
+                  {systemHealth?.aiProvider || "-"} ·{" "}
+                  {systemHealth?.aiConfigured ? "可用" : "待配置"}
+                </dd>
+              </dl>
+            </section>
+          </div>
 
           <div className="system-columns">
             <section className="panel system-backups">
