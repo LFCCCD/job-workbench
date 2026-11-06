@@ -37,16 +37,48 @@ describe("JobDatabase", () => {
         total: 1,
         active: 1,
         archived: 0,
-        schemaVersion: 2,
+        schemaVersion: 3,
         pendingTasks: 0,
       });
 
+      database.updateJob(job.id, {
+        title: "软件实施工程师",
+        company: "示例科技",
+        salary: "8-11K",
+        city: "杭州",
+        district: "余杭区",
+        experience: "经验不限",
+        degree: "本科",
+        category: "软件实施",
+        link: "",
+        description: "负责系统实施和客户培训",
+        notes: "重点跟进",
+      });
+      database.setFavorite(job.id, true);
       database.updateStatus(job.id, "准备沟通");
       expect(database.getJob(job.id)?.status).toBe("准备沟通");
+      expect(database.getJobDetail(job.id).events.length).toBeGreaterThan(1);
+      expect(database.listJobs({ query: "客户培训" })).toHaveLength(1);
+      expect(database.listJobs({ category: "软件实施" })).toHaveLength(1);
+      expect(database.listJobs({ favoriteOnly: true })).toHaveLength(1);
+
+      const view = database.saveView("杭州实施", {
+        query: "",
+        category: "软件实施",
+        status: "",
+        favoriteOnly: false,
+        archived: "active",
+        sort: "score",
+      });
+      expect(database.listSavedViews()[0]).toMatchObject({
+        id: view.id,
+        name: "杭州实施",
+      });
 
       expect(database.setArchived([job.id], true)).toBe(1);
       expect(database.listJobs()).toHaveLength(0);
-      expect(database.listJobs(true)).toHaveLength(1);
+      expect(database.listJobs({ archived: "archived" })).toHaveLength(1);
+      expect(database.listJobs({ archived: "all" })).toHaveLength(1);
 
       database.setArchived([job.id], false);
       expect(database.listJobs()).toHaveLength(1);
@@ -76,6 +108,11 @@ describe("JobDatabase", () => {
         progress: 100,
         result: { score: 80 },
       });
+
+      database.setArchived([job.id], true);
+      expect(database.permanentlyDeleteJobs([job.id])).toBe(1);
+      expect(database.listJobs({ archived: "all" })).toHaveLength(0);
+      expect(database.deleteSavedView(view.id)).toBe(1);
     } finally {
       database.close();
     }
@@ -152,9 +189,11 @@ describe("JobDatabase", () => {
         const preview = database.inspectLegacyDatabase(currentLegacyPath!);
         expect(preview.integrity).toBe("ok");
         const result = await database.migrateLegacy(currentLegacyPath!);
-        expect(database.listJobs(true)).toHaveLength(preview.counts.jobs);
+        expect(database.listJobs({ archived: "all" })).toHaveLength(
+          preview.counts.jobs,
+        );
         expect(fs.existsSync(result.backupPath)).toBe(true);
-        expect(database.getSchemaVersion()).toBe(2);
+        expect(database.getSchemaVersion()).toBe(3);
       } finally {
         database.close();
       }

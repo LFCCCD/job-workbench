@@ -13,6 +13,10 @@ import {
   JobStatusSchema,
   ListJobsSchema,
   ManualJobSchema,
+  PermanentDeleteSchema,
+  SaveViewSchema,
+  SetFavoriteSchema,
+  UpdateJobSchema,
   UpdateJobStatusSchema,
 } from "../shared/contracts";
 import type { MigrationPreview } from "../shared/contracts";
@@ -80,15 +84,25 @@ function createWindow() {
 function registerIpc() {
   ipcMain.handle("workbench:dashboard", () => getDatabase().getDashboard());
   ipcMain.handle("workbench:list-jobs", (_event, input) => {
-    const { includeArchived } = ListJobsSchema.parse(input || {});
-    return getDatabase().listJobs(includeArchived);
+    return getDatabase().listJobs(ListJobsSchema.parse(input || {}));
+  });
+  ipcMain.handle("workbench:job-detail", (_event, id) => {
+    return getDatabase().getJobDetail(String(id));
   });
   ipcMain.handle("workbench:add-job", (_event, input) => {
     return getDatabase().addJob(ManualJobSchema.parse(input));
   });
+  ipcMain.handle("workbench:update-job", (_event, input) => {
+    const parsed = UpdateJobSchema.parse(input);
+    return getDatabase().updateJob(parsed.id, parsed.fields);
+  });
   ipcMain.handle("workbench:update-status", (_event, input) => {
     const { id, status } = UpdateJobStatusSchema.parse(input);
     return getDatabase().updateStatus(id, JobStatusSchema.parse(status));
+  });
+  ipcMain.handle("workbench:set-favorite", (_event, input) => {
+    const parsed = SetFavoriteSchema.parse(input);
+    return getDatabase().setFavorite(parsed.id, parsed.favorite);
   });
   ipcMain.handle("workbench:archive-jobs", (_event, input) => {
     const { ids } = ArchiveJobsSchema.parse(input);
@@ -99,6 +113,22 @@ function registerIpc() {
     const { ids } = ArchiveJobsSchema.parse(input);
     const count = getDatabase().setArchived(ids, false);
     return { ok: true, message: `已恢复 ${count} 个岗位` };
+  });
+  ipcMain.handle("workbench:delete-jobs-permanently", (_event, input) => {
+    const { ids } = PermanentDeleteSchema.parse(input);
+    const count = getDatabase().permanentlyDeleteJobs(ids);
+    return { ok: true, message: `已永久删除 ${count} 个岗位` };
+  });
+  ipcMain.handle("workbench:list-views", () => {
+    return getDatabase().listSavedViews();
+  });
+  ipcMain.handle("workbench:save-view", (_event, input) => {
+    const parsed = SaveViewSchema.parse(input);
+    return getDatabase().saveView(parsed.name, parsed.filters);
+  });
+  ipcMain.handle("workbench:delete-view", (_event, id) => {
+    const deleted = getDatabase().deleteSavedView(String(id));
+    return { ok: true, message: deleted ? "筛选视图已删除" : "筛选视图不存在" };
   });
   ipcMain.handle("workbench:create-backup", async () => {
     return getDatabase().createBackup("manual");

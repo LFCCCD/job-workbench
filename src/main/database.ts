@@ -5,14 +5,20 @@ import {
   DatabaseSync,
   backup as backupDatabase,
 } from "node:sqlite";
+import { ListJobsSchema } from "../shared/contracts";
 import type {
   DashboardData,
+  JobDetail,
+  JobEventRecord,
+  JobFilters,
   JobRecord,
+  JobRecordUpdate,
   JobStatus,
   ManualJobInput,
   MigrationPreview,
   MigrationResult,
   RestoreResult,
+  SavedView,
   TaskRecord,
   TaskStatus,
 } from "../shared/contracts";
@@ -42,7 +48,7 @@ const JOB_COLUMNS = `
   last_seen_at, updated_at
 `;
 
-const CURRENT_SCHEMA_VERSION = 2;
+const CURRENT_SCHEMA_VERSION = 3;
 const REQUIRED_TABLES = [
   "jobs",
   "job_events",
@@ -183,6 +189,14 @@ export class JobDatabase {
         applied_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS saved_views (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        filters_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
       CREATE INDEX IF NOT EXISTS idx_jobs_archived ON jobs(archived_at);
       CREATE INDEX IF NOT EXISTS idx_job_events_job ON job_events(job_id, created_at DESC);
@@ -234,6 +248,19 @@ export class JobDatabase {
         throw new Error("M2 schema migration prerequisites are missing");
       }
       record.run(2, "durable-tasks-and-archive", timestamp);
+    }
+    if (this.getSchemaVersion() < 3) {
+      const tableNames = new Set(
+        (
+          this.db
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .all() as SqlRow[]
+        ).map((row) => String(row.name)),
+      );
+      if (!tableNames.has("saved_views")) {
+        throw new Error("M2 saved views migration is missing");
+      }
+      record.run(3, "job-filters-and-saved-views", timestamp);
     }
     if (this.getSchemaVersion() > CURRENT_SCHEMA_VERSION) {
       throw new Error("数据库版本高于当前应用版本");
@@ -461,15 +488,69 @@ export class JobDatabase {
     return row ? this.rowToJob(row) : null;
   }
 
-  listJobs(includeArchived = false): JobRecord[] {
-    const where = includeArchived ? "" : "WHERE archived_at IS NULL";
+  getJobDetail(id: string): JobDetail {
+    const job = this.getJob(id);
+    if (!job) throw new Error("岗位不存在");
+    const events = (
+      this.db
+        .prepare(
+          "SELECT * FROM job_events WHERE job_id = ? ORDER BY id DESC",
+        )
+        .all(id) as SqlRow[]
+    ).map(
+      (row): JobEventRecord => ({
+        id: Number(row.id),
+        eventType: String(row.event_type),
+        fromStatus: row.from_status ? String(row.from_status) : null,
+        toStatus: row.to_status ? String(row.to_status) : null,
+        note: String(row.note || ""),
+        createdAt: String(row.created_at),
+      }),
+    );
+    return { job, events };
+  }
+
+  listJobs(input: Partial<JobFilters> = {}): JobRecord[] {
+    const filters = ListJobsSchema.parse(input);
+    const where: string[] = [];
+    const params: Array<string | number> = [];
+    if (filters.archived === "active") {
+      where.push("archived_at IS NULL");
+    } else if (filters.archived === "archived") {
+      where.push("archived_at IS NOT NULL");
+    }
+    if (filters.query) {
+      where.push(
+        "(title LIKE ? OR company LIKE ? OR city LIKE ? OR district LIKE ? OR description LIKE ?)",
+      );
+      const query = `%${filters.query}%`;
+      params.push(query, query, query, query, query);
+    }
+    if (filters.category) {
+      where.push("category = ?");
+      params.push(filters.category);
+    }
+    if (filters.status) {
+      where.push("status = ?");
+      params.push(filters.status);
+    }
+    if (filters.favoriteOnly) {
+      where.push("favorite = 1");
+    }
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    const orderSql =
+      filters.sort === "score"
+        ? "favorite DESC, score DESC, updated_at DESC"
+        : filters.sort === "company"
+          ? "company COLLATE NOCASE, title COLLATE NOCASE"
+          : "favorite DESC, updated_at DESC";
     return (
       this.db
         .prepare(
-          `SELECT * FROM jobs ${where}
-           ORDER BY favorite DESC, score DESC, updated_at DESC`,
+          `SELECT * FROM jobs ${whereSql}
+           ORDER BY ${orderSql}`,
         )
-        .all() as SqlRow[]
+        .all(...params) as SqlRow[]
     ).map((row) => this.rowToJob(row));
   }
 
@@ -551,6 +632,57 @@ export class JobDatabase {
     return this.getJob(id)!;
   }
 
+  updateJob(id: string, fields: JobRecordUpdate): JobRecord {
+    if (!this.getJob(id)) throw new Error("岗位不存在");
+    const timestamp = new Date().toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db
+        .prepare(`
+          UPDATE jobs SET
+            title = ?, company = ?, salary = ?, city = ?, district = ?,
+            experience = ?, degree = ?, category = ?, link = ?,
+            description = ?, notes = ?, updated_at = ?
+          WHERE id = ?
+        `)
+        .run(
+          fields.title,
+          fields.company,
+          fields.salary,
+          fields.city,
+          fields.district,
+          fields.experience,
+          fields.degree,
+          fields.category,
+          fields.link,
+          fields.description,
+          fields.notes,
+          timestamp,
+          id,
+        );
+      this.db
+        .prepare(`
+          INSERT INTO job_events (
+            job_id, event_type, from_status, to_status, note, created_at
+          ) VALUES (?, 'job_edit', NULL, NULL, '更新岗位信息', ?)
+        `)
+        .run(id, timestamp);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return this.getJob(id)!;
+  }
+
+  setFavorite(id: string, favorite: boolean): JobRecord {
+    if (!this.getJob(id)) throw new Error("岗位不存在");
+    this.db
+      .prepare("UPDATE jobs SET favorite = ?, updated_at = ? WHERE id = ?")
+      .run(favorite ? 1 : 0, new Date().toISOString(), id);
+    return this.getJob(id)!;
+  }
+
   updateStatus(id: string, status: JobStatus): JobRecord {
     const current = this.getJob(id);
     if (!current) throw new Error("岗位不存在");
@@ -579,13 +711,95 @@ export class JobDatabase {
     if (!ids.length) return 0;
     const placeholders = ids.map(() => "?").join(", ");
     const timestamp = new Date().toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this.db
+        .prepare(`SELECT id FROM jobs WHERE id IN (${placeholders})`)
+        .all(...ids) as SqlRow[];
+      const result = this.db
+        .prepare(
+          `UPDATE jobs
+           SET archived_at = ?, updated_at = ?
+           WHERE id IN (${placeholders})`,
+        )
+        .run(archived ? timestamp : null, timestamp, ...ids);
+      const event = this.db.prepare(`
+        INSERT INTO job_events (
+          job_id, event_type, from_status, to_status, note, created_at
+        ) VALUES (?, ?, NULL, NULL, ?, ?)
+      `);
+      for (const row of existing) {
+        event.run(
+          String(row.id),
+          archived ? "archived" : "restored",
+          archived ? "移入回收站" : "从回收站恢复",
+          timestamp,
+        );
+      }
+      this.db.exec("COMMIT");
+      return Number(result.changes);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  permanentlyDeleteJobs(ids: string[]): number {
+    if (!ids.length) return 0;
+    const placeholders = ids.map(() => "?").join(", ");
     const result = this.db
       .prepare(
-        `UPDATE jobs
-         SET archived_at = ?, updated_at = ?
-         WHERE id IN (${placeholders})`,
+        `DELETE FROM jobs
+         WHERE archived_at IS NOT NULL AND id IN (${placeholders})`,
       )
-      .run(archived ? timestamp : null, timestamp, ...ids);
+      .run(...ids);
+    return Number(result.changes);
+  }
+
+  listSavedViews(): SavedView[] {
+    return (
+      this.db
+        .prepare("SELECT * FROM saved_views ORDER BY updated_at DESC")
+        .all() as SqlRow[]
+    ).map((row) => ({
+      id: String(row.id),
+      name: String(row.name),
+      filters: ListJobsSchema.parse(
+        JSON.parse(String(row.filters_json || "{}")),
+      ),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    }));
+  }
+
+  saveView(name: string, filters: JobFilters): SavedView {
+    const timestamp = new Date().toISOString();
+    const id = `view-${randomUUID()}`;
+    this.db
+      .prepare(`
+        INSERT INTO saved_views (id, name, filters_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(name) DO UPDATE SET
+          filters_json = excluded.filters_json,
+          updated_at = excluded.updated_at
+      `)
+      .run(id, name, JSON.stringify(filters), timestamp, timestamp);
+    const row = this.db
+      .prepare("SELECT * FROM saved_views WHERE name = ?")
+      .get(name) as SqlRow;
+    return {
+      id: String(row.id),
+      name: String(row.name),
+      filters: ListJobsSchema.parse(JSON.parse(String(row.filters_json))),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
+  }
+
+  deleteSavedView(id: string): number {
+    const result = this.db
+      .prepare("DELETE FROM saved_views WHERE id = ?")
+      .run(id);
     return Number(result.changes);
   }
 

@@ -23,6 +23,8 @@ The first milestone proves the complete local desktop path:
   a safety backup.
 - `schema_migrations` records schema versions. The current schema version is 2.
 - Durable tasks are stored in SQLite with idempotency keys and interrupted-on-restart handling.
+- Job filters are validated with shared Zod contracts and saved views are stored in SQLite.
+- Permanent deletion is restricted to jobs already in the recycle bin.
 
 ## Database decision
 
@@ -36,5 +38,5 @@ to avoid native ABI rebuilds and installer packaging risk.
 - AI Provider and AI utility process
 - Durable task queue and recovery UI
 - Full CRM and interview records
-- Multi-version resume editor
+- Full multi-version resume editor
 - Auto update and code signing
