@@ -1,0 +1,11 @@
+node_modules/
+out/
+release/
+artifacts/
+.npm-cache/
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.DS_Store
+Thumbs.db
