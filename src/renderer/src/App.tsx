@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import type {
+  CollectorPreviewData,
+  CollectorRequest,
+  CollectorStatus,
   DashboardData,
   JobDetail,
   JobFilters,
@@ -30,6 +33,40 @@ const defaultFilters: JobFilters = {
   archived: "active",
   sort: "updated",
 };
+
+const collectorCities = [
+  { name: "杭州", code: 101210100 },
+  { name: "宁波", code: 101210400 },
+  { name: "嘉兴", code: 101210300 },
+  { name: "丽水", code: 101210800 },
+] as const;
+
+const defaultCollectorRequest: CollectorRequest = {
+  cities: [collectorCities[0], collectorCities[3]],
+  queries: ["软件实施工程师", "技术支持工程师"],
+  pagesPerQuery: 1,
+  maxSearchRequests: 6,
+  detailLimit: 12,
+  requestDelayMs: 4_500,
+};
+
+const viewCopy = {
+  jobs: {
+    eyebrow: "JOB PIPELINE",
+    title: "职位池",
+    description: "筛选、详情、收藏、状态时间线与回收站",
+  },
+  collector: {
+    eyebrow: "COLLECTOR WORKER",
+    title: "采集中心",
+    description: "专用 Edge、低频采集、候选预览与人工确认导入",
+  },
+  tasks: {
+    eyebrow: "TASK CENTER",
+    title: "任务中心",
+    description: "持久化任务、进度、取消、重试与重启恢复",
+  },
+} as const;
 
 const finishedTaskStatuses = new Set([
   "succeeded",
@@ -88,12 +125,24 @@ function eventLabel(eventType: string): string {
 }
 
 export function App() {
-  const [view, setView] = useState<"jobs" | "tasks">("jobs");
+  const [view, setView] = useState<"jobs" | "collector" | "tasks">("jobs");
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [filters, setFilters] = useState<JobFilters>(defaultFilters);
   const [views, setViews] = useState<SavedView[]>([]);
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
+  const [collectorPreview, setCollectorPreview] =
+    useState<CollectorPreviewData | null>(null);
+  const [collectorStatus, setCollectorStatus] =
+    useState<CollectorStatus | null>(null);
+  const [collectorRequest, setCollectorRequest] =
+    useState<CollectorRequest>(defaultCollectorRequest);
+  const [collectorQueriesText, setCollectorQueriesText] = useState(
+    defaultCollectorRequest.queries.join("\n"),
+  );
+  const [selectedCandidates, setSelectedCandidates] = useState<Set<string>>(
+    new Set(),
+  );
   const [selectedViewId, setSelectedViewId] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
@@ -108,16 +157,35 @@ export function App() {
   const [busy, setBusy] = useState(false);
 
   async function refresh(nextFilters = filters) {
-    const [nextDashboard, nextJobs, nextViews, nextTasks] = await Promise.all([
+    const [
+      nextDashboard,
+      nextJobs,
+      nextViews,
+      nextTasks,
+      nextCollectorPreview,
+      nextCollectorStatus,
+    ] = await Promise.all([
       window.jobWorkbench.getDashboard(),
       window.jobWorkbench.listJobs(nextFilters),
       window.jobWorkbench.listSavedViews(),
       window.jobWorkbench.listTasks(),
+      window.jobWorkbench.listCollectorPreview(),
+      window.jobWorkbench.getCollectorStatus(),
     ]);
     setDashboard(nextDashboard);
     setJobs(nextJobs);
     setViews(nextViews);
     setTasks(nextTasks);
+    setCollectorPreview(nextCollectorPreview);
+    setCollectorStatus(nextCollectorStatus);
+    setSelectedCandidates((current) => {
+      const available = new Set(
+        nextCollectorPreview.candidates.map(
+          (candidate) => candidate.candidate.sourceKey,
+        ),
+      );
+      return new Set([...current].filter((id) => available.has(id)));
+    });
     setSelected((current) => {
       const available = new Set(nextJobs.map((job) => job.id));
       return new Set([...current].filter((id) => available.has(id)));
@@ -149,9 +217,11 @@ export function App() {
       void Promise.all([
         window.jobWorkbench.listTasks(),
         window.jobWorkbench.getDashboard(),
-      ]).then(([nextTasks, nextDashboard]) => {
+        window.jobWorkbench.listCollectorPreview(),
+      ]).then(([nextTasks, nextDashboard, nextCollectorPreview]) => {
         setTasks(nextTasks);
         setDashboard(nextDashboard);
+        setCollectorPreview(nextCollectorPreview);
       });
     }, 800);
     return () => window.clearInterval(timer);
@@ -327,6 +397,84 @@ export function App() {
     });
   }
 
+  async function openCollectorBrowser() {
+    await runOperation(async () => {
+      const status = await window.jobWorkbench.openCollectorBrowser();
+      setCollectorStatus(status);
+      showMessage("专用 Edge 已启动，请完成扫码登录");
+    });
+  }
+
+  async function startCollector() {
+    const queries = collectorQueriesText
+      .split(/\r?\n|,|，/)
+      .map((query) => query.trim())
+      .filter(Boolean);
+    if (!queries.length) {
+      showMessage("至少填写一个搜索关键词");
+      return;
+    }
+    if (!collectorRequest.cities.length) {
+      showMessage("至少选择一个城市");
+      return;
+    }
+    await runOperation(async () => {
+      await window.jobWorkbench.createCollectorTask({
+        ...collectorRequest,
+        queries,
+      });
+      setView("tasks");
+      showMessage("采集任务已创建，完成后候选岗位会进入采集中心");
+    });
+  }
+
+  function toggleCollectorCity(code: number, checked: boolean) {
+    const city = collectorCities.find((item) => item.code === code);
+    if (!city) return;
+    setCollectorRequest((current) => ({
+      ...current,
+      cities: checked
+        ? [...current.cities.filter((item) => item.code !== code), city]
+        : current.cities.filter((item) => item.code !== code),
+    }));
+  }
+
+  function toggleCandidate(sourceKey: string) {
+    setSelectedCandidates((current) => {
+      const next = new Set(current);
+      if (next.has(sourceKey)) next.delete(sourceKey);
+      else next.add(sourceKey);
+      return next;
+    });
+  }
+
+  async function importCandidates() {
+    if (!selectedCandidates.size) return;
+    await runOperation(async () => {
+      const result = await window.jobWorkbench.importCollectorCandidates([
+        ...selectedCandidates,
+      ]);
+      setSelectedCandidates(new Set());
+      setView("jobs");
+      showMessage(result.message);
+    });
+  }
+
+  async function dismissCandidates() {
+    if (!selectedCandidates.size) return;
+    const confirmed = window.confirm(
+      `从候选预览中移除选中的 ${selectedCandidates.size} 个岗位？`,
+    );
+    if (!confirmed) return;
+    await runOperation(async () => {
+      const result = await window.jobWorkbench.dismissCollectorCandidates([
+        ...selectedCandidates,
+      ]);
+      setSelectedCandidates(new Set());
+      showMessage(result.message);
+    });
+  }
+
   async function cancelTask(id: string) {
     await runOperation(async () => {
       await window.jobWorkbench.cancelTask(id);
@@ -359,6 +507,20 @@ export function App() {
   const allSelected =
     visibleIds.length > 0 && visibleIds.every((id) => selected.has(id));
   const categoryOptions = [...new Set(jobs.map((job) => job.category).filter(Boolean))];
+  const candidateIds =
+    collectorPreview?.candidates.map(
+      (candidate) => candidate.candidate.sourceKey,
+    ) || [];
+  const allCandidatesSelected =
+    candidateIds.length > 0 &&
+    candidateIds.every((id) => selectedCandidates.has(id));
+  const activeCollectorTask = tasks.find(
+    (task) =>
+      task.type === "collector" &&
+      (task.status === "queued" || task.status === "running"),
+  );
+  const lastCollectorTask = tasks.find((task) => task.type === "collector");
+  const copy = viewCopy[view];
 
   return (
     <div className="app">
@@ -367,7 +529,7 @@ export function App() {
           <div className="brand-mark">J</div>
           <div>
             <strong>求职工作台</strong>
-            <small>M2 · Data Core</small>
+            <small>M2 · Collector Worker</small>
           </div>
         </div>
         <nav>
@@ -376,6 +538,15 @@ export function App() {
             onClick={() => setView("jobs")}
           >
             职位池
+          </button>
+          <button
+            className={view === "collector" ? "active" : ""}
+            onClick={() => setView("collector")}
+          >
+            采集中心
+            {collectorPreview?.counts.total ? (
+              <span className="nav-count">{collectorPreview.counts.total}</span>
+            ) : null}
           </button>
           <button
             className={view === "tasks" ? "active" : ""}
@@ -396,15 +567,9 @@ export function App() {
       <main>
         <header className="topbar">
           <div>
-            <p className="eyebrow">
-              {view === "jobs" ? "JOB PIPELINE" : "TASK CENTER"}
-            </p>
-            <h1>{view === "jobs" ? "职位池" : "任务中心"}</h1>
-            <p className="muted">
-              {view === "jobs"
-                ? "筛选、详情、收藏、状态时间线与回收站"
-                : "持久化任务、进度、取消、重试与重启恢复"}
-            </p>
+            <p className="eyebrow">{copy.eyebrow}</p>
+            <h1>{copy.title}</h1>
+            <p className="muted">{copy.description}</p>
           </div>
           <div className="top-actions">
             {view === "jobs" ? (
@@ -426,6 +591,32 @@ export function App() {
                   onClick={() => setShowAddDialog(true)}
                 >
                   手动添加岗位
+                </button>
+              </>
+            ) : view === "collector" ? (
+              <>
+                <button
+                  onClick={() => void openCollectorBrowser()}
+                  disabled={busy}
+                >
+                  启动专用 Edge
+                </button>
+                <button
+                  onClick={() => void runOperation(async () => {
+                    setCollectorStatus(
+                      await window.jobWorkbench.getCollectorStatus(),
+                    );
+                  })}
+                  disabled={busy}
+                >
+                  刷新连接
+                </button>
+                <button
+                  className="primary"
+                  onClick={() => void startCollector()}
+                  disabled={busy || Boolean(activeCollectorTask)}
+                >
+                  {activeCollectorTask ? "采集进行中" : "开始采集"}
                 </button>
               </>
             ) : (
@@ -821,6 +1012,330 @@ export function App() {
         </section>
         </div>
 
+        <section
+          hidden={view !== "collector"}
+          className="collector-center"
+        >
+          <section className="collector-metrics">
+            <article>
+              <span>专用 Edge</span>
+              <strong
+                className={collectorStatus?.edgeRunning ? "online" : ""}
+              >
+                {collectorStatus?.edgeRunning ? "已连接" : "未连接"}
+              </strong>
+            </article>
+            <article>
+              <span>待预览候选</span>
+              <strong>{collectorPreview?.counts.total ?? 0}</strong>
+            </article>
+            <article>
+              <span>职位池中没有</span>
+              <strong>{collectorPreview?.counts.newInJobs ?? 0}</strong>
+            </article>
+            <article>
+              <span>已有岗位更新</span>
+              <strong>{collectorPreview?.counts.existingInJobs ?? 0}</strong>
+            </article>
+          </section>
+
+          <section className="panel collector-setup">
+            <div className="collector-intro">
+              <div>
+                <p className="eyebrow">SAFE COLLECTION</p>
+                <h2>采集条件</h2>
+                <p className="muted">
+                  Worker 使用独立 Edge 资料目录，不读取 Cookie，不自动投递或发送消息。
+                </p>
+              </div>
+              <div
+                className={`connection-pill ${
+                  collectorStatus?.edgeRunning ? "connected" : ""
+                }`}
+              >
+                <span className="dot" />
+                {collectorStatus?.edgeRunning
+                  ? "Edge 调试连接正常"
+                  : "请先启动专用 Edge 并扫码登录"}
+              </div>
+            </div>
+
+            <div className="collector-form">
+              <fieldset>
+                <legend>目标城市</legend>
+                <div className="city-options">
+                  {collectorCities.map((city) => (
+                    <label key={city.code}>
+                      <input
+                        type="checkbox"
+                        checked={collectorRequest.cities.some(
+                          (selectedCity) =>
+                            selectedCity.code === city.code,
+                        )}
+                        onChange={(event) =>
+                          toggleCollectorCity(
+                            city.code,
+                            event.target.checked,
+                          )
+                        }
+                      />
+                      {city.name}
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
+              <label>
+                搜索关键词（每行一个）
+                <textarea
+                  rows={4}
+                  value={collectorQueriesText}
+                  onChange={(event) =>
+                    setCollectorQueriesText(event.target.value)
+                  }
+                />
+              </label>
+              <div className="collector-number-grid">
+                <label>
+                  每个条件页数
+                  <input
+                    type="number"
+                    min={1}
+                    max={3}
+                    value={collectorRequest.pagesPerQuery}
+                    onChange={(event) =>
+                      setCollectorRequest({
+                        ...collectorRequest,
+                        pagesPerQuery: Number(event.target.value),
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  本轮请求上限
+                  <input
+                    type="number"
+                    min={1}
+                    max={12}
+                    value={collectorRequest.maxSearchRequests}
+                    onChange={(event) =>
+                      setCollectorRequest({
+                        ...collectorRequest,
+                        maxSearchRequests: Number(event.target.value),
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  详情读取上限
+                  <input
+                    type="number"
+                    min={0}
+                    max={30}
+                    value={collectorRequest.detailLimit}
+                    onChange={(event) =>
+                      setCollectorRequest({
+                        ...collectorRequest,
+                        detailLimit: Number(event.target.value),
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  请求间隔（毫秒）
+                  <input
+                    type="number"
+                    min={3500}
+                    max={15000}
+                    step={500}
+                    value={collectorRequest.requestDelayMs}
+                    onChange={(event) =>
+                      setCollectorRequest({
+                        ...collectorRequest,
+                        requestDelayMs: Number(event.target.value),
+                      })
+                    }
+                  />
+                </label>
+              </div>
+              <div className="safety-note">
+                遇到登录失效、环境异常、访问频繁或验证码提示时，采集会立即停止。
+                请保持低频使用，并优先在 BOSS 客户端或网页中人工查看岗位。
+              </div>
+            </div>
+
+            {activeCollectorTask ? (
+              <div className="active-collector-task">
+                <div>
+                  <strong>采集任务运行中</strong>
+                  <span>{activeCollectorTask.progress}%</span>
+                </div>
+                <div className="progress-line">
+                  <span
+                    style={{ width: `${activeCollectorTask.progress}%` }}
+                  />
+                </div>
+                <button
+                  className="danger"
+                  onClick={() => void cancelTask(activeCollectorTask.id)}
+                  disabled={busy}
+                >
+                  停止采集
+                </button>
+              </div>
+            ) : lastCollectorTask?.status === "failed" ? (
+              <div className="collector-last-result failed">
+                <strong>最近一次采集失败</strong>
+                <p>{lastCollectorTask.error}</p>
+                <button
+                  onClick={() => void retryTask(lastCollectorTask.id)}
+                  disabled={busy}
+                >
+                  重试采集
+                </button>
+              </div>
+            ) : lastCollectorTask?.status === "succeeded" ? (
+              <div className="collector-last-result">
+                最近一次采集抓取{" "}
+                {String(lastCollectorTask.result.captured ?? 0)} 个岗位，新增预览{" "}
+                {String(lastCollectorTask.result.addedToPreview ?? 0)} 个。
+              </div>
+            ) : null}
+          </section>
+
+          <section className="panel collector-preview">
+            <div className="candidate-heading">
+              <div>
+                <p className="eyebrow">CANDIDATE REVIEW</p>
+                <h2>候选岗位预览</h2>
+                <p className="muted">
+                  采集结果先进入暂存区。确认后才会写入正式职位池；已有岗位只更新描述和来源字段。
+                </p>
+              </div>
+              <span className="status-badge">
+                新增 {collectorPreview?.counts.newInJobs ?? 0} · 已有{" "}
+                {collectorPreview?.counts.existingInJobs ?? 0}
+              </span>
+            </div>
+            {collectorPreview?.candidates.length ? (
+              <>
+                <div className="list-head candidate-actions">
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={allCandidatesSelected}
+                      onChange={() =>
+                        setSelectedCandidates(
+                          allCandidatesSelected
+                            ? new Set()
+                            : new Set(candidateIds),
+                        )
+                      }
+                    />
+                    <span>全选</span>
+                  </label>
+                  <span className="muted">
+                    已选 {selectedCandidates.size} 个
+                  </span>
+                  <button
+                    onClick={() => void dismissCandidates()}
+                    disabled={!selectedCandidates.size || busy}
+                  >
+                    忽略选中
+                  </button>
+                  <button
+                    className="primary"
+                    onClick={() => void importCandidates()}
+                    disabled={!selectedCandidates.size || busy}
+                  >
+                    导入选中岗位
+                  </button>
+                </div>
+                <div className="candidate-list">
+                  {collectorPreview.candidates.map((item) => {
+                    const candidate = item.candidate;
+                    return (
+                      <article
+                        className={`candidate-card ${
+                          selectedCandidates.has(candidate.sourceKey)
+                            ? "selected"
+                            : ""
+                        }`}
+                        key={candidate.sourceKey}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selectedCandidates.has(
+                            candidate.sourceKey,
+                          )}
+                          onChange={() =>
+                            toggleCandidate(candidate.sourceKey)
+                          }
+                          aria-label={`选择候选 ${candidate.title}`}
+                        />
+                        <div>
+                          <div className="job-title">
+                            <h3>{candidate.title}</h3>
+                            <span>{candidate.salary || "薪资未填"}</span>
+                          </div>
+                          <p className="company">
+                            {candidate.company} · {candidate.city}
+                            {candidate.district
+                              ? ` · ${candidate.district}`
+                              : ""}
+                          </p>
+                          <p className="job-meta">
+                            {candidate.experience || "经验未填"} ·{" "}
+                            {candidate.degree || "学历未填"} ·{" "}
+                            {candidate.category} · 匹配分 {candidate.score}
+                          </p>
+                          {candidate.reason ? (
+                            <p className="candidate-reason">
+                              {candidate.reason}
+                            </p>
+                          ) : null}
+                          {candidate.risks.length ? (
+                            <ul className="candidate-risks">
+                              {candidate.risks.map((risk) => (
+                                <li key={risk}>{risk}</li>
+                              ))}
+                            </ul>
+                          ) : null}
+                        </div>
+                        <div className="candidate-side">
+                          <span
+                            className={
+                              item.existsInJobs ? "existing" : "new"
+                            }
+                          >
+                            {item.existsInJobs ? "更新已有" : "新增岗位"}
+                          </span>
+                          {item.seenCount > 1 ? (
+                            <small>第 {item.seenCount} 次采集</small>
+                          ) : null}
+                          {candidate.link ? (
+                            <a
+                              href={candidate.link}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              打开 BOSS
+                            </a>
+                          ) : null}
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              </>
+            ) : (
+              <div className="empty">
+                <strong>暂无待预览岗位</strong>
+                <p>先完成专用 Edge 登录，再启动一次低频采集。</p>
+              </div>
+            )}
+          </section>
+        </section>
+
         <section hidden={view !== "tasks"} className="panel task-center">
           <div className="task-summary">
             <div>
@@ -844,7 +1359,11 @@ export function App() {
                     <div className="task-head">
                       <div>
                         <strong>
-                          {task.type === "backup" ? "数据库备份" : task.type}
+                          {task.type === "backup"
+                            ? "数据库备份"
+                            : task.type === "collector"
+                              ? "BOSS 候选采集"
+                              : task.type}
                         </strong>
                         <p className="muted">
                           {task.id} · {new Date(task.createdAt).toLocaleString()}
@@ -876,6 +1395,14 @@ export function App() {
                         备份文件：<code>{task.result.path}</code>
                       </p>
                     ) : null}
+                    {task.type === "collector" &&
+                    typeof task.result.captured === "number" ? (
+                      <p className="task-result">
+                        抓取 {task.result.captured} 个岗位 · 新增预览{" "}
+                        {String(task.result.addedToPreview ?? 0)} · 已有岗位{" "}
+                        {String(task.result.existingInJobPool ?? 0)}
+                      </p>
+                    ) : null}
                     <div className="button-row">
                       {isActive ? (
                         <button
@@ -904,7 +1431,7 @@ export function App() {
           ) : (
             <div className="empty">
               <strong>暂无任务</strong>
-              <p>创建一个后台备份任务，或等待后续采集与 AI 任务接入。</p>
+              <p>创建一个后台备份任务，或在采集中心启动 BOSS 候选采集。</p>
             </div>
           )}
         </section>

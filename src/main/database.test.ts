@@ -52,7 +52,7 @@ describe("JobDatabase", () => {
         total: 1,
         active: 1,
         archived: 0,
-        schemaVersion: 3,
+        schemaVersion: 4,
         pendingTasks: 0,
       });
 
@@ -194,6 +194,87 @@ describe("JobDatabase", () => {
     }
   });
 
+  it("stages, previews, imports and refreshes collected candidates", () => {
+    const root = createRoot();
+    const database = new JobDatabase(root);
+    try {
+      const collectedAt = new Date().toISOString();
+      const candidate = {
+        sourceKey: "boss:test-job-1",
+        title: "软件实施工程师",
+        company: "采集测试公司",
+        salary: "7-10K",
+        city: "杭州",
+        district: "余杭区",
+        experience: "经验不限",
+        degree: "本科",
+        industry: "企业服务",
+        companyScale: "100-499人",
+        skills: ["SQL", "客户培训"],
+        category: "软件实施",
+        score: 78,
+        reason: "岗位方向匹配；经验不限",
+        risks: [],
+        description: "负责系统实施、客户培训和项目验收。",
+        greeting: "您好，想了解岗位是否接受往届毕业生。",
+        link: "https://www.zhipin.com/job_detail/test-job-1.html",
+        sourceQueries: ["软件实施工程师"],
+        collectedAt,
+      };
+
+      expect(
+        database.stageCollectorCandidates("task-1", [candidate]),
+      ).toMatchObject({
+        addedToPreview: 1,
+        refreshedInPreview: 0,
+        existingInJobPool: 0,
+      });
+      expect(database.getCollectorPreview()).toMatchObject({
+        counts: { total: 1, newInJobs: 1, existingInJobs: 0 },
+      });
+
+      expect(
+        database.importCollectorCandidates([candidate.sourceKey]),
+      ).toMatchObject({ imported: 1, updated: 0 });
+      expect(database.listJobs({ query: "采集测试公司" })).toHaveLength(1);
+      expect(database.getCollectorPreview().counts.total).toBe(0);
+
+      expect(
+        database.stageCollectorCandidates("task-2", [
+          {
+            ...candidate,
+            salary: "8-12K",
+            collectedAt: new Date().toISOString(),
+          },
+        ]),
+      ).toMatchObject({
+        addedToPreview: 0,
+        refreshedInPreview: 1,
+        existingInJobPool: 1,
+      });
+      expect(database.getCollectorPreview()).toMatchObject({
+        counts: { total: 1, newInJobs: 0, existingInJobs: 1 },
+      });
+      expect(
+        database.importCollectorCandidates([candidate.sourceKey]),
+      ).toMatchObject({ imported: 0, updated: 1 });
+      expect(database.listJobs({ query: "采集测试公司" })[0].salary).toBe(
+        "8-12K",
+      );
+
+      database.saveCollectorCache([
+        {
+          key: "101210100|软件实施工程师|1",
+          candidates: [candidate],
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      ]);
+      expect(database.getCollectorCache()).toHaveLength(1);
+    } finally {
+      database.close();
+    }
+  });
+
   it("persists tasks, resumes queued work and clears finished records", async () => {
     const root = createRoot();
     const database = new JobDatabase(root);
@@ -246,7 +327,7 @@ describe("JobDatabase", () => {
           preview.counts.jobs,
         );
         expect(fs.existsSync(result.backupPath)).toBe(true);
-        expect(database.getSchemaVersion()).toBe(3);
+        expect(database.getSchemaVersion()).toBe(4);
       } finally {
         database.close();
       }

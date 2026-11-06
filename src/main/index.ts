@@ -9,8 +9,12 @@ import {
 } from "electron";
 import { JobDatabase } from "./database";
 import { TaskService } from "./task-service";
+import { CollectorBrowserService } from "./collector-browser";
+import { CollectorService } from "./collector-service";
 import {
   ArchiveJobsSchema,
+  CollectorIdsSchema,
+  CollectorRequestSchema,
   JobStatusSchema,
   ListJobsSchema,
   ManualJobSchema,
@@ -31,6 +35,7 @@ app.setPath("userData", userDataRoot);
 let mainWindow: BrowserWindow | null = null;
 let database: JobDatabase | null = null;
 let taskService: TaskService | null = null;
+let collectorBrowser: CollectorBrowserService | null = null;
 let pendingMigration: MigrationPreview | null = null;
 
 function getDatabase(): JobDatabase {
@@ -41,8 +46,19 @@ function getDatabase(): JobDatabase {
 }
 
 function getTaskService(): TaskService {
-  taskService ||= new TaskService(getDatabase());
+  if (!taskService) {
+    const collector = new CollectorService(
+      getDatabase(),
+      path.join(currentDir, "collector-worker.js"),
+    );
+    taskService = new TaskService(getDatabase(), collector);
+  }
   return taskService;
+}
+
+function getCollectorBrowser(): CollectorBrowserService {
+  collectorBrowser ||= new CollectorBrowserService(app.getPath("userData"));
+  return collectorBrowser;
 }
 
 function escapeHtml(value: unknown): string {
@@ -145,6 +161,28 @@ function registerIpc() {
   });
   ipcMain.handle("workbench:create-backup-task", () => {
     return getTaskService().enqueue("backup");
+  });
+  ipcMain.handle("workbench:create-collector-task", (_event, input) => {
+    const request = CollectorRequestSchema.parse(input);
+    return getTaskService().enqueue("collector", request);
+  });
+  ipcMain.handle("workbench:collector-status", () => {
+    return getCollectorBrowser().status();
+  });
+  ipcMain.handle("workbench:open-collector-browser", () => {
+    return getCollectorBrowser().open();
+  });
+  ipcMain.handle("workbench:collector-preview", () => {
+    return getDatabase().getCollectorPreview();
+  });
+  ipcMain.handle("workbench:import-collector-candidates", (_event, input) => {
+    const { ids } = CollectorIdsSchema.parse(input);
+    return getDatabase().importCollectorCandidates(ids);
+  });
+  ipcMain.handle("workbench:dismiss-collector-candidates", (_event, input) => {
+    const { ids } = CollectorIdsSchema.parse(input);
+    const count = getDatabase().dismissCollectorCandidates(ids);
+    return { ok: true, message: `已移除 ${count} 个候选岗位` };
   });
   ipcMain.handle("workbench:cancel-task", (_event, id) => {
     return getTaskService().cancel(String(id));

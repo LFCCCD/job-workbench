@@ -39,6 +39,39 @@ async function main() {
       }
     });
     await page.waitForSelector("text=职位池");
+    await page.locator("nav").getByRole("button", { name: /采集中心/ }).click();
+    await page.waitForSelector("text=采集条件");
+    const collectorStatus = await page.evaluate(() =>
+      window.jobWorkbench.getCollectorStatus(),
+    );
+    if (!collectorStatus || typeof collectorStatus.edgeRunning !== "boolean") {
+      throw new Error("Collector status IPC did not return a valid response");
+    }
+    await page.getByRole("button", { name: "开始采集" }).click();
+    await page.waitForSelector(".task-card");
+    await page.waitForFunction(
+      () =>
+        document.querySelector(".task-status")?.textContent?.includes("失败"),
+      null,
+      { timeout: 20_000 },
+    );
+    const collectorTaskError = await page
+      .locator(".task-error")
+      .first()
+      .textContent();
+    if (!collectorTaskError?.includes("专用 Edge")) {
+      throw new Error(
+        `Collector Worker failure was not actionable: ${collectorTaskError}`,
+      );
+    }
+    await page.locator("nav").getByRole("button", { name: /采集中心/ }).click();
+    await page.waitForSelector("text=最近一次采集失败");
+    await page.screenshot({
+      path: path.join(__dirname, "..", "artifacts", "smoke-collector.png"),
+      fullPage: true,
+    });
+    await page.locator("nav").getByRole("button", { name: "职位池" }).click();
+    await page.waitForSelector("text=手动添加岗位");
     await page.getByRole("button", { name: "手动添加岗位" }).click();
     const addDialog = page.locator(".modal");
     await addDialog.getByLabel("岗位名称", { exact: true }).fill("软件实施工程师");

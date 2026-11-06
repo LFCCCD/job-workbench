@@ -1,4 +1,4 @@
-# M1 Architecture Notes
+# Architecture Notes
 
 ## Scope
 
@@ -21,12 +21,19 @@ The first milestone proves the complete local desktop path:
 - PDF rendering uses a hidden BrowserWindow and never loads remote resources.
 - Data-layer migration is transactional, checked with `PRAGMA integrity_check`, and preceded by
   a safety backup.
-- `schema_migrations` records schema versions. The current schema version is 2.
+- `schema_migrations` records schema versions. The current schema version is 4.
 - Durable tasks are stored in SQLite with idempotency keys and interrupted-on-restart handling.
 - The task center executes registered task types in the main process, exposes progress and
   errors through IPC, and supports cancel, retry, and finished-record cleanup.
 - Job filters are validated with shared Zod contracts and saved views are stored in SQLite.
 - Permanent deletion is restricted to jobs already in the recycle bin.
+- BOSS collection runs in an Electron `utilityProcess`; the worker never opens SQLite.
+- The worker connects to a dedicated Edge profile through local CDP and receives only typed
+  collection requests plus normalized cached search results.
+- The main process validates worker messages, stages candidates in SQLite, and is the only
+  process allowed to import candidates into the job table.
+- Collection stops on login failure, risk-control messages, CAPTCHA messages, or abnormal
+  responses. It never automates applications, messages, CAPTCHA, or rate-limit bypasses.
 
 ## Database decision
 
@@ -36,9 +43,7 @@ to avoid native ABI rebuilds and installer packaging risk.
 
 ## Deferred work
 
-- BOSS Collector utility process
 - AI Provider and AI utility process
-- Background collectors and AI handlers for the existing durable task queue
 - Full CRM and interview records
 - Full multi-version resume editor
 - Auto update and code signing

@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
+  CollectorRequest,
   JobFilters,
   JobStatus,
   JobWorkbenchApi,
@@ -41,6 +42,17 @@ const api: JobWorkbenchApi = {
   listTasks: () => ipcRenderer.invoke("workbench:list-tasks"),
   createBackupTask: () =>
     ipcRenderer.invoke("workbench:create-backup-task"),
+  createCollectorTask: (request: CollectorRequest) =>
+    ipcRenderer.invoke("workbench:create-collector-task", request),
+  getCollectorStatus: () => ipcRenderer.invoke("workbench:collector-status"),
+  openCollectorBrowser: () =>
+    ipcRenderer.invoke("workbench:open-collector-browser"),
+  listCollectorPreview: () =>
+    ipcRenderer.invoke("workbench:collector-preview"),
+  importCollectorCandidates: (ids: string[]) =>
+    ipcRenderer.invoke("workbench:import-collector-candidates", { ids }),
+  dismissCollectorCandidates: (ids: string[]) =>
+    ipcRenderer.invoke("workbench:dismiss-collector-candidates", { ids }),
   cancelTask: (id: string) =>
     ipcRenderer.invoke("workbench:cancel-task", id),
   retryTask: (id: string) => ipcRenderer.invoke("workbench:retry-task", id),

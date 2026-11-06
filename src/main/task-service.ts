@@ -1,7 +1,10 @@
 import type { OperationResult, TaskRecord, TaskStatus } from "../shared/contracts";
+import { CollectorRequestSchema } from "../shared/contracts";
+import type { CollectorService } from "./collector-service";
 import { JobDatabase } from "./database";
 
 type TaskHandlerContext = {
+  taskId: string;
   signal: AbortSignal;
   reportProgress(progress: number): void;
 };
@@ -15,11 +18,32 @@ export class TaskService {
   private readonly handlers = new Map<string, TaskHandler>();
   private readonly running = new Map<string, AbortController>();
 
-  constructor(private readonly database: JobDatabase) {
+  constructor(
+    private readonly database: JobDatabase,
+    private readonly collector: CollectorService | null = null,
+  ) {
     this.handlers.set("backup", async () => {
       const path = await this.database.createBackup("scheduled");
       return { path };
     });
+    if (this.collector) {
+      this.handlers.set("collector", async (payload, context) => {
+        const request = CollectorRequestSchema.parse(payload);
+        const collected = await this.collector!.run(request, context);
+        const staged = this.database.stageCollectorCandidates(
+          context.taskId,
+          collected.candidates,
+        );
+        return {
+          captured: collected.candidates.length,
+          addedToPreview: staged.addedToPreview,
+          refreshedInPreview: staged.refreshedInPreview,
+          existingInJobPool: staged.existingInJobPool,
+          cachedSearches: collected.cachedSearches,
+          warnings: collected.warnings,
+        };
+      });
+    }
   }
 
   resumeQueuedTasks() {
@@ -107,6 +131,7 @@ export class TaskService {
 
     try {
       const result = await handler(task.payload, {
+        taskId: id,
         signal: controller.signal,
         reportProgress: (progress) => {
           const current = this.database.getTask(id);

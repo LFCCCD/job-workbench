@@ -135,6 +135,17 @@ nav button.active {
   background: #e7f6f2;
 }
 
+.nav-count {
+  float: right;
+  min-width: 21px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: #e7f6f2;
+  background: #287d78;
+  font-size: 10px;
+  text-align: center;
+}
+
 .sidebar-status {
   margin-top: auto;
   display: flex;
@@ -548,6 +559,271 @@ footer {
 
 .task-center {
   min-height: 520px;
+}
+
+.collector-center {
+  display: grid;
+  gap: 15px;
+}
+
+.collector-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 13px;
+}
+
+.collector-metrics article {
+  padding: 16px 17px;
+  border: 1px solid #d7e4e4;
+  border-radius: 15px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 12px 30px rgba(29, 66, 68, 0.07);
+}
+
+.collector-metrics span,
+.collector-metrics strong {
+  display: block;
+}
+
+.collector-metrics span {
+  color: #60747b;
+  font-size: 12px;
+}
+
+.collector-metrics strong {
+  margin-top: 5px;
+  color: #173b3e;
+  font-size: 23px;
+}
+
+.collector-metrics strong.online {
+  color: #15704e;
+}
+
+.collector-intro,
+.candidate-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.collector-intro h2,
+.candidate-heading h2 {
+  margin: 0;
+}
+
+.collector-intro p,
+.candidate-heading p {
+  margin: 4px 0 0;
+}
+
+.connection-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: max-content;
+  padding: 7px 10px;
+  border-radius: 999px;
+  color: #825e22;
+  background: #fff3dc;
+  font-size: 11px;
+}
+
+.connection-pill .dot {
+  background: #d19a36;
+}
+
+.connection-pill.connected {
+  color: #176946;
+  background: #dff3e9;
+}
+
+.connection-pill.connected .dot {
+  background: #39a875;
+}
+
+.collector-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1.8fr) minmax(280px, 1fr);
+  gap: 14px 18px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid #e1eaea;
+}
+
+.collector-form fieldset {
+  grid-row: span 2;
+  min-width: 0;
+  margin: 0;
+  padding: 13px;
+  border: 1px solid #dce7e7;
+  border-radius: 11px;
+}
+
+.collector-form legend {
+  padding: 0 5px;
+  color: #52666c;
+  font-size: 12px;
+}
+
+.collector-form > label,
+.collector-number-grid label {
+  display: grid;
+  gap: 5px;
+  color: #60747b;
+  font-size: 11px;
+}
+
+.city-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding-top: 5px;
+}
+
+.city-options label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #263d43;
+  font-size: 13px;
+}
+
+.city-options input {
+  width: 17px;
+  min-height: 17px;
+}
+
+.collector-number-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.collector-number-grid input {
+  width: 100%;
+}
+
+.safety-note {
+  grid-column: 1 / -1;
+  padding: 10px 12px;
+  border-radius: 9px;
+  color: #7d5b20;
+  background: #fff5e4;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.active-collector-task,
+.collector-last-result {
+  margin-top: 15px;
+  padding: 12px;
+  border-radius: 10px;
+  background: #f2f8f7;
+  font-size: 12px;
+}
+
+.active-collector-task > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 7px;
+}
+
+.active-collector-task button {
+  margin-top: 9px;
+}
+
+.collector-last-result.failed {
+  color: #933c3c;
+  background: #fdf0f0;
+}
+
+.collector-last-result p {
+  margin: 5px 0 9px;
+}
+
+.collector-preview {
+  min-height: 330px;
+}
+
+.candidate-actions {
+  margin-top: 14px;
+}
+
+.candidate-list {
+  display: grid;
+  gap: 11px;
+  margin-top: 13px;
+}
+
+.candidate-card {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 125px;
+  gap: 12px;
+  padding: 15px;
+  border: 1px solid #dce7e7;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.candidate-card.selected {
+  border-color: #67bdb7;
+  background: #f3fbf8;
+}
+
+.candidate-card > input {
+  width: 18px;
+  min-height: 18px;
+  margin-top: 5px;
+}
+
+.candidate-card h3 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.candidate-card p {
+  margin: 4px 0 0;
+}
+
+.candidate-reason {
+  color: #42646b;
+  font-size: 12px;
+}
+
+.candidate-risks {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: #936024;
+  font-size: 11px;
+}
+
+.candidate-side {
+  display: grid;
+  justify-items: end;
+  align-content: start;
+  gap: 7px;
+  font-size: 11px;
+}
+
+.candidate-side span {
+  padding: 3px 7px;
+  border-radius: 999px;
+}
+
+.candidate-side span.new {
+  color: #176946;
+  background: #dff3e9;
+}
+
+.candidate-side span.existing {
+  color: #826122;
+  background: #fff0d2;
+}
+
+.candidate-side small {
+  color: #718187;
 }
 
 .task-summary {

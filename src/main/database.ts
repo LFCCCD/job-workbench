@@ -5,8 +5,17 @@ import {
   DatabaseSync,
   backup as backupDatabase,
 } from "node:sqlite";
-import { ListJobsSchema } from "../shared/contracts";
+import {
+  CollectorCacheEntrySchema,
+  CollectorCandidateSchema,
+  ListJobsSchema,
+} from "../shared/contracts";
 import type {
+  CollectorCacheEntry,
+  CollectorCandidate,
+  CollectorCandidatePreview,
+  CollectorImportResult,
+  CollectorPreviewData,
   DashboardData,
   JobDetail,
   JobEventRecord,
@@ -48,7 +57,7 @@ const JOB_COLUMNS = `
   last_seen_at, updated_at
 `;
 
-const CURRENT_SCHEMA_VERSION = 3;
+const CURRENT_SCHEMA_VERSION = 4;
 const REQUIRED_TABLES = [
   "jobs",
   "job_events",
@@ -197,13 +206,51 @@ export class JobDatabase {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS collector_candidates (
+        source_key TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        company TEXT NOT NULL,
+        salary TEXT NOT NULL DEFAULT '',
+        city TEXT NOT NULL DEFAULT '',
+        district TEXT NOT NULL DEFAULT '',
+        experience TEXT NOT NULL DEFAULT '',
+        degree TEXT NOT NULL DEFAULT '',
+        industry TEXT NOT NULL DEFAULT '',
+        company_scale TEXT NOT NULL DEFAULT '',
+        skills_json TEXT NOT NULL DEFAULT '[]',
+        category TEXT NOT NULL DEFAULT '',
+        score INTEGER NOT NULL DEFAULT 0,
+        reason TEXT NOT NULL DEFAULT '',
+        risks_json TEXT NOT NULL DEFAULT '[]',
+        description TEXT NOT NULL DEFAULT '',
+        greeting TEXT NOT NULL DEFAULT '',
+        link TEXT NOT NULL DEFAULT '',
+        source_queries_json TEXT NOT NULL DEFAULT '[]',
+        seen_count INTEGER NOT NULL DEFAULT 1,
+        state TEXT NOT NULL DEFAULT 'pending',
+        imported_job_id TEXT,
+        collected_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS collector_cache (
+        cache_key TEXT PRIMARY KEY,
+        candidates_json TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
       CREATE INDEX IF NOT EXISTS idx_jobs_archived ON jobs(archived_at);
       CREATE INDEX IF NOT EXISTS idx_job_events_job ON job_events(job_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_collector_candidates_state
+        ON collector_candidates(state, updated_at DESC);
     `);
 
     this.ensureArchivedColumn();
+    this.ensureSourceKeyColumn();
     this.applyMigrations();
     this.checkIntegrity();
     this.markInterruptedTasks();
@@ -216,6 +263,18 @@ export class JobDatabase {
     if (!columns.some((column) => column.name === "archived_at")) {
       this.db.exec("ALTER TABLE jobs ADD COLUMN archived_at TEXT");
     }
+  }
+
+  private ensureSourceKeyColumn() {
+    const columns = this.db
+      .prepare("PRAGMA table_info(jobs)")
+      .all() as SqlRow[];
+    if (!columns.some((column) => column.name === "source_key")) {
+      this.db.exec("ALTER TABLE jobs ADD COLUMN source_key TEXT");
+    }
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_jobs_source_key ON jobs(source_key)",
+    );
   }
 
   getSchemaVersion(): number {
@@ -261,6 +320,28 @@ export class JobDatabase {
         throw new Error("M2 saved views migration is missing");
       }
       record.run(3, "job-filters-and-saved-views", timestamp);
+    }
+    if (this.getSchemaVersion() < 4) {
+      const tableNames = new Set(
+        (
+          this.db
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .all() as SqlRow[]
+        ).map((row) => String(row.name)),
+      );
+      const jobColumns = new Set(
+        (
+          this.db.prepare("PRAGMA table_info(jobs)").all() as SqlRow[]
+        ).map((row) => String(row.name)),
+      );
+      if (
+        !tableNames.has("collector_candidates") ||
+        !tableNames.has("collector_cache") ||
+        !jobColumns.has("source_key")
+      ) {
+        throw new Error("M2 collector migration prerequisites are missing");
+      }
+      record.run(4, "collector-candidate-staging-and-cache", timestamp);
     }
     if (this.getSchemaVersion() > CURRENT_SCHEMA_VERSION) {
       throw new Error("数据库版本高于当前应用版本");
@@ -393,6 +474,355 @@ export class JobDatabase {
       )
       .run();
     return Number(result.changes);
+  }
+
+  getCollectorPreview(): CollectorPreviewData {
+    const rows = this.db
+      .prepare(`
+        SELECT
+          candidate.*,
+          CASE WHEN job.id IS NULL THEN 0 ELSE 1 END AS exists_in_jobs
+        FROM collector_candidates AS candidate
+        LEFT JOIN jobs AS job ON job.source_key = candidate.source_key
+        WHERE candidate.state = 'pending'
+        ORDER BY
+          CASE WHEN job.id IS NULL THEN 0 ELSE 1 END,
+          candidate.score DESC,
+          candidate.updated_at DESC
+      `)
+      .all() as SqlRow[];
+    const candidates = rows.map(
+      (row): CollectorCandidatePreview => ({
+        candidate: this.rowToCollectorCandidate(row),
+        taskId: String(row.task_id),
+        seenCount: Number(row.seen_count || 1),
+        existsInJobs: Boolean(row.exists_in_jobs),
+        updatedAt: String(row.updated_at),
+      }),
+    );
+    const existingInJobs = candidates.filter(
+      (candidate) => candidate.existsInJobs,
+    ).length;
+    return {
+      candidates,
+      counts: {
+        total: candidates.length,
+        newInJobs: candidates.length - existingInJobs,
+        existingInJobs,
+      },
+    };
+  }
+
+  stageCollectorCandidates(
+    taskId: string,
+    input: CollectorCandidate[],
+  ): {
+    addedToPreview: number;
+    refreshedInPreview: number;
+    existingInJobPool: number;
+  } {
+    const candidates = input.map((candidate) =>
+      CollectorCandidateSchema.parse(candidate),
+    );
+    const timestamp = new Date().toISOString();
+    const insert = this.db.prepare(`
+      INSERT INTO collector_candidates (
+        source_key, task_id, title, company, salary, city, district,
+        experience, degree, industry, company_scale, skills_json, category,
+        score, reason, risks_json, description, greeting, link,
+        source_queries_json, seen_count, state, imported_job_id,
+        collected_at, updated_at
+      ) VALUES (
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        1, 'pending', NULL, ?, ?
+      )
+      ON CONFLICT(source_key) DO UPDATE SET
+        task_id = excluded.task_id,
+        title = excluded.title,
+        company = excluded.company,
+        salary = excluded.salary,
+        city = excluded.city,
+        district = excluded.district,
+        experience = excluded.experience,
+        degree = excluded.degree,
+        industry = excluded.industry,
+        company_scale = excluded.company_scale,
+        skills_json = excluded.skills_json,
+        category = excluded.category,
+        score = excluded.score,
+        reason = excluded.reason,
+        risks_json = excluded.risks_json,
+        description = excluded.description,
+        greeting = excluded.greeting,
+        link = excluded.link,
+        source_queries_json = excluded.source_queries_json,
+        seen_count = collector_candidates.seen_count + 1,
+        state = 'pending',
+        imported_job_id = NULL,
+        collected_at = excluded.collected_at,
+        updated_at = excluded.updated_at
+    `);
+    let addedToPreview = 0;
+    let refreshedInPreview = 0;
+    let existingInJobPool = 0;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const candidate of candidates) {
+        const previous = this.db
+          .prepare(
+            "SELECT source_key FROM collector_candidates WHERE source_key = ?",
+          )
+          .get(candidate.sourceKey);
+        const existingJob = this.db
+          .prepare("SELECT id FROM jobs WHERE source_key = ? LIMIT 1")
+          .get(candidate.sourceKey);
+        if (previous) refreshedInPreview += 1;
+        else addedToPreview += 1;
+        if (existingJob) existingInJobPool += 1;
+        insert.run(
+          candidate.sourceKey,
+          taskId,
+          candidate.title,
+          candidate.company,
+          candidate.salary,
+          candidate.city,
+          candidate.district,
+          candidate.experience,
+          candidate.degree,
+          candidate.industry,
+          candidate.companyScale,
+          JSON.stringify(candidate.skills),
+          candidate.category,
+          candidate.score,
+          candidate.reason,
+          JSON.stringify(candidate.risks),
+          candidate.description,
+          candidate.greeting,
+          candidate.link,
+          JSON.stringify(candidate.sourceQueries),
+          candidate.collectedAt,
+          timestamp,
+        );
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return { addedToPreview, refreshedInPreview, existingInJobPool };
+  }
+
+  importCollectorCandidates(ids: string[]): CollectorImportResult {
+    const uniqueIds = [...new Set(ids)];
+    if (!uniqueIds.length) {
+      return { imported: 0, updated: 0, message: "没有选择候选岗位" };
+    }
+    const placeholders = uniqueIds.map(() => "?").join(", ");
+    const candidates = this.db
+      .prepare(
+        `SELECT * FROM collector_candidates
+         WHERE state = 'pending' AND source_key IN (${placeholders})`,
+      )
+      .all(...uniqueIds) as SqlRow[];
+    const timestamp = new Date().toISOString();
+    let imported = 0;
+    let updated = 0;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const row of candidates) {
+        const candidate = this.rowToCollectorCandidate(row);
+        const existing = this.db
+          .prepare("SELECT id FROM jobs WHERE source_key = ? LIMIT 1")
+          .get(candidate.sourceKey) as SqlRow | undefined;
+        let jobId: string;
+        if (existing) {
+          jobId = String(existing.id);
+          this.db
+            .prepare(`
+              UPDATE jobs SET
+                title = ?, company = ?, salary = ?, city = ?, district = ?,
+                experience = ?, degree = ?, industry = ?, company_scale = ?,
+                skills_json = ?, category = ?, score = ?, grade = ?,
+                reason = ?, risks_json = ?, description = ?, greeting = ?,
+                link = ?, source_queries_json = ?, last_seen_at = ?,
+                updated_at = ?
+              WHERE id = ?
+            `)
+            .run(
+              candidate.title,
+              candidate.company,
+              candidate.salary,
+              candidate.city,
+              candidate.district,
+              candidate.experience,
+              candidate.degree,
+              candidate.industry,
+              candidate.companyScale,
+              JSON.stringify(candidate.skills),
+              candidate.category,
+              candidate.score,
+              this.gradeForScore(candidate.score),
+              candidate.reason,
+              JSON.stringify(candidate.risks),
+              candidate.description,
+              candidate.greeting,
+              candidate.link,
+              JSON.stringify(candidate.sourceQueries),
+              candidate.collectedAt,
+              timestamp,
+              jobId,
+            );
+          updated += 1;
+        } else {
+          jobId = `collected-${randomUUID()}`;
+          this.db
+            .prepare(`
+              INSERT INTO jobs (
+                id, title, company, salary, city, district, experience,
+                degree, industry, company_scale, skills_json, category, score,
+                grade, reason, risks_json, description, greeting, link, source,
+                source_key, source_queries_json, status, favorite, notes,
+                first_seen_at, last_seen_at, updated_at
+              ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                'BOSS采集', ?, ?, '待判断', 0, '', ?, ?, ?
+              )
+            `)
+            .run(
+              jobId,
+              candidate.title,
+              candidate.company,
+              candidate.salary,
+              candidate.city,
+              candidate.district,
+              candidate.experience,
+              candidate.degree,
+              candidate.industry,
+              candidate.companyScale,
+              JSON.stringify(candidate.skills),
+              candidate.category,
+              candidate.score,
+              this.gradeForScore(candidate.score),
+              candidate.reason,
+              JSON.stringify(candidate.risks),
+              candidate.description,
+              candidate.greeting,
+              candidate.link,
+              candidate.sourceKey,
+              JSON.stringify(candidate.sourceQueries),
+              candidate.collectedAt,
+              candidate.collectedAt,
+              timestamp,
+            );
+          imported += 1;
+        }
+        this.db
+          .prepare(`
+            UPDATE collector_candidates
+            SET state = 'imported', imported_job_id = ?, updated_at = ?
+            WHERE source_key = ?
+          `)
+          .run(jobId, timestamp, candidate.sourceKey);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return {
+      imported,
+      updated,
+      message: `已导入 ${imported} 个岗位，更新 ${updated} 个已有岗位`,
+    };
+  }
+
+  dismissCollectorCandidates(ids: string[]): number {
+    if (!ids.length) return 0;
+    const placeholders = ids.map(() => "?").join(", ");
+    const result = this.db
+      .prepare(
+        `DELETE FROM collector_candidates
+         WHERE state = 'pending' AND source_key IN (${placeholders})`,
+      )
+      .run(...[...new Set(ids)]);
+    return Number(result.changes);
+  }
+
+  getCollectorCache(): CollectorCacheEntry[] {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM collector_cache WHERE expires_at > ? ORDER BY updated_at DESC",
+      )
+      .all(new Date().toISOString()) as SqlRow[];
+    return rows.map((row) =>
+      CollectorCacheEntrySchema.parse({
+        key: String(row.cache_key),
+        candidates: JSON.parse(String(row.candidates_json || "[]")),
+        expiresAt: String(row.expires_at),
+      }),
+    );
+  }
+
+  saveCollectorCache(entries: CollectorCacheEntry[]): number {
+    if (!entries.length) return 0;
+    const timestamp = new Date().toISOString();
+    const statement = this.db.prepare(`
+      INSERT INTO collector_cache (
+        cache_key, candidates_json, expires_at, updated_at
+      ) VALUES (?, ?, ?, ?)
+      ON CONFLICT(cache_key) DO UPDATE SET
+        candidates_json = excluded.candidates_json,
+        expires_at = excluded.expires_at,
+        updated_at = excluded.updated_at
+    `);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const entry of entries) {
+        statement.run(
+          entry.key,
+          JSON.stringify(entry.candidates),
+          entry.expiresAt,
+          timestamp,
+        );
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return entries.length;
+  }
+
+  private rowToCollectorCandidate(row: SqlRow): CollectorCandidate {
+    return CollectorCandidateSchema.parse({
+      sourceKey: String(row.source_key),
+      title: String(row.title),
+      company: String(row.company),
+      salary: String(row.salary || ""),
+      city: String(row.city || ""),
+      district: String(row.district || ""),
+      experience: String(row.experience || ""),
+      degree: String(row.degree || ""),
+      industry: String(row.industry || ""),
+      companyScale: String(row.company_scale || ""),
+      skills: JSON.parse(String(row.skills_json || "[]")),
+      category: String(row.category || ""),
+      score: Number(row.score || 0),
+      reason: String(row.reason || ""),
+      risks: JSON.parse(String(row.risks_json || "[]")),
+      description: String(row.description || ""),
+      greeting: String(row.greeting || ""),
+      link: String(row.link || ""),
+      sourceQueries: JSON.parse(String(row.source_queries_json || "[]")),
+      collectedAt: String(row.collected_at),
+    });
+  }
+
+  private gradeForScore(score: number): string {
+    if (score >= 75) return "优先沟通";
+    if (score >= 60) return "值得沟通";
+    if (score >= 45) return "谨慎沟通";
+    return "暂不优先";
   }
 
   private rowToTask(row: SqlRow): TaskRecord {
@@ -616,6 +1046,15 @@ export class JobDatabase {
           .get() as SqlRow
       ).count || 0,
     );
+    const pendingCandidates = Number(
+      (
+        this.db
+          .prepare(
+            "SELECT COUNT(*) AS count FROM collector_candidates WHERE state = 'pending'",
+          )
+          .get() as SqlRow
+      ).count || 0,
+    );
 
     return {
       total,
@@ -627,6 +1066,7 @@ export class JobDatabase {
       lastBackupPath: lastBackup ? String(lastBackup.value) : null,
       schemaVersion: this.getSchemaVersion(),
       pendingTasks,
+      pendingCandidates,
     };
   }
 
@@ -1022,6 +1462,8 @@ export class JobDatabase {
         this.db.exec("DELETE FROM resume_profile");
         this.db.exec("DELETE FROM tasks");
         this.db.exec("DELETE FROM app_settings");
+        this.db.exec("DELETE FROM collector_candidates");
+        this.db.exec("DELETE FROM collector_cache");
         for (const table of [
           "jobs",
           "job_events",
@@ -1030,6 +1472,8 @@ export class JobDatabase {
           "resume_versions",
           "tasks",
           "app_settings",
+          "collector_candidates",
+          "collector_cache",
         ]) {
           if (!sourceTables.has(table)) continue;
           const target = targetColumns(table);
