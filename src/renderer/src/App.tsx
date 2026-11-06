@@ -1219,6 +1219,34 @@ export function App() {
     });
   }
 
+  async function setAutoLaunch(enabled: boolean) {
+    await runOperation(async () => {
+      const result = await window.jobWorkbench.setAutoLaunchEnabled(enabled);
+      await refreshSystemHealth();
+      showMessage(result.message);
+    });
+  }
+
+  async function checkForUpdates() {
+    await runOperation(async () => {
+      const info = await window.jobWorkbench.checkForUpdates(true);
+      await refreshSystemHealth();
+      showMessage(
+        info.available
+          ? `发现新版本 ${info.latestTag}`
+          : `当前已是可用版本 ${info.currentVersion}`,
+      );
+    });
+  }
+
+  async function setUpdateAutoCheck(enabled: boolean) {
+    await runOperation(async () => {
+      const result = await window.jobWorkbench.setUpdateAutoCheck(enabled);
+      await refreshSystemHealth();
+      showMessage(result.message);
+    });
+  }
+
   async function cancelTask(id: string) {
     await runOperation(async () => {
       await window.jobWorkbench.cancelTask(id);
@@ -3589,6 +3617,114 @@ export function App() {
               </dl>
             </section>
           </div>
+
+          <section className="panel system-updates">
+            <div className="system-section-head">
+              <div>
+                <p className="eyebrow">STARTUP & UPDATES</p>
+                <h2>启动与更新</h2>
+                <p className="muted">
+                  开机自启需要在安装版中开启；更新只检查版本并打开下载页面。
+                </p>
+              </div>
+              <span className="status-badge">
+                {systemHealth?.updateInfo?.available
+                  ? `发现 ${systemHealth.updateInfo.latestTag}`
+                  : "手动更新"}
+              </span>
+            </div>
+            <div className="startup-grid">
+              <label className="system-toggle">
+                <input
+                  type="checkbox"
+                  checked={Boolean(systemHealth?.autoLaunchEnabled)}
+                  disabled={!systemHealth?.autoLaunchSupported || busy}
+                  onChange={(event) =>
+                    void setAutoLaunch(event.target.checked)
+                  }
+                />
+                <span>
+                  <strong>Windows 登录时启动</strong>
+                  <small>
+                    {systemHealth?.autoLaunchSupported
+                      ? "安装版可用"
+                      : "开发版不写入系统自启"}
+                  </small>
+                </span>
+              </label>
+              <label className="system-toggle">
+                <input
+                  type="checkbox"
+                  checked={Boolean(systemHealth?.autoUpdateCheckEnabled)}
+                  disabled={busy}
+                  onChange={(event) =>
+                    void setUpdateAutoCheck(event.target.checked)
+                  }
+                />
+                <span>
+                  <strong>启动后自动检查更新</strong>
+                  <small>最多每 6 小时检查一次</small>
+                </span>
+              </label>
+            </div>
+            <div className="update-card">
+              <div>
+                <span>当前版本</span>
+                <strong>v{systemHealth?.appVersion || "-"}</strong>
+              </div>
+              <div>
+                <span>最新版本</span>
+                <strong>
+                  {systemHealth?.updateInfo?.latestTag || "尚未检查"}
+                </strong>
+                {systemHealth?.updateInfo?.publishedAt ? (
+                  <small>
+                    发布于{" "}
+                    {new Date(
+                      systemHealth.updateInfo.publishedAt,
+                    ).toLocaleDateString()}
+                  </small>
+                ) : null}
+              </div>
+              <button
+                className="primary"
+                onClick={() => void checkForUpdates()}
+                disabled={busy}
+              >
+                检查更新
+              </button>
+            </div>
+            {systemHealth?.updateInfo?.notes ? (
+              <details className="release-notes">
+                <summary>查看 Release 说明</summary>
+                <pre>{systemHealth.updateInfo.notes}</pre>
+              </details>
+            ) : null}
+            <div className="button-row">
+              {systemHealth?.updateInfo?.htmlUrl ? (
+                <a
+                  href={systemHealth.updateInfo.htmlUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  打开发布页面
+                </a>
+              ) : null}
+              {systemHealth?.updateInfo?.downloadUrl ? (
+                <a
+                  href={systemHealth.updateInfo.downloadUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  下载安装包
+                </a>
+              ) : null}
+            </div>
+            <p className="signing-note">
+              当前安装包未配置代码签名证书，Windows 可能显示 SmartScreen
+              提示。代码签名不会用自签名证书冒充正式签名。
+            </p>
+          </section>
 
           <div className="system-columns">
             <section className="panel system-backups">

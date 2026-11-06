@@ -20,11 +20,14 @@ import { AppLogger } from "./app-logger";
 import { HealthService } from "./health-service";
 import { ReminderService } from "./reminder-service";
 import { createTrayImage } from "./tray-icon";
+import { AutoLaunchService } from "./auto-launch-service";
+import { UpdateService } from "./update-service";
 import {
   AiAnalysisIdSchema,
   AiAnalyzeRequestSchema,
   AiSettingsInputSchema,
   ArchiveJobsSchema,
+  AutoLaunchSettingSchema,
   CollectorIdsSchema,
   CollectorRequestSchema,
   CrmDeleteSchema,
@@ -48,6 +51,7 @@ import {
   SetFollowUpStatusSchema,
   UpdateJobSchema,
   UpdateJobStatusSchema,
+  UpdateCheckSchema,
 } from "../shared/contracts";
 import type { MigrationPreview } from "../shared/contracts";
 
@@ -58,6 +62,9 @@ const userDataRoot =
 app.setPath("userData", userDataRoot);
 const startedAt = Date.now();
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (process.platform === "win32") {
+  app.setAppUserModelId("cn.gongchang.jobworkbench");
+}
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -69,6 +76,9 @@ let appLogger: AppLogger | null = null;
 let healthService: HealthService | null = null;
 let reminderService: ReminderService | null = null;
 let reminderTimer: NodeJS.Timeout | null = null;
+let updateTimer: NodeJS.Timeout | null = null;
+let autoLaunchService: AutoLaunchService | null = null;
+let updateService: UpdateService | null = null;
 let isQuitting = false;
 let pendingMigration: MigrationPreview | null = null;
 
@@ -114,12 +124,28 @@ function getAppLogger(): AppLogger {
   return appLogger;
 }
 
+function getAutoLaunchService(): AutoLaunchService {
+  autoLaunchService ||= new AutoLaunchService();
+  return autoLaunchService;
+}
+
+function getUpdateService(): UpdateService {
+  updateService ||= new UpdateService(
+    getDatabase(),
+    app.getVersion(),
+    getAppLogger(),
+  );
+  return updateService;
+}
+
 function getHealthService(): HealthService {
   healthService ||= new HealthService(
     getDatabase(),
     getCollectorBrowser(),
     getAiSettingsService(),
     getAppLogger(),
+    getAutoLaunchService(),
+    getUpdateService(),
     app.getVersion(),
     startedAt,
     () => Boolean(tray),
@@ -559,6 +585,26 @@ function registerIpc() {
     getAppLogger().log("info", "diagnostics.exported");
     return save.filePath;
   });
+  ipcMain.handle("workbench:set-auto-launch", (_event, input) => {
+    const { enabled } = AutoLaunchSettingSchema.parse(input);
+    getAutoLaunchService().setEnabled(enabled);
+    return {
+      ok: true,
+      message: enabled ? "Windows 登录自启已开启" : "Windows 登录自启已关闭",
+    };
+  });
+  ipcMain.handle("workbench:check-updates", (_event, input) => {
+    const { force } = UpdateCheckSchema.parse(input || {});
+    return getUpdateService().check(force);
+  });
+  ipcMain.handle("workbench:set-update-auto-check", (_event, input) => {
+    const { enabled } = NotificationSettingSchema.parse(input);
+    getUpdateService().setAutoCheck(enabled);
+    return {
+      ok: true,
+      message: enabled ? "自动检查更新已开启" : "自动检查更新已关闭",
+    };
+  });
   ipcMain.handle("workbench:cancel-task", (_event, id) => {
     return getTaskService().cancel(String(id));
   });
@@ -686,6 +732,14 @@ if (!hasSingleInstanceLock) {
       updateTrayMenu();
     }, 5 * 60 * 1_000);
     reminderTimer.unref();
+    updateTimer = setTimeout(() => {
+      if (getUpdateService().isAutoCheckEnabled()) {
+        void getUpdateService().check().catch(() => {
+          // The health page retains the last successful update result.
+        });
+      }
+    }, 6_000);
+    updateTimer.unref();
 
     app.on("activate", showMainWindow);
   });
@@ -698,6 +752,8 @@ if (!hasSingleInstanceLock) {
     isQuitting = true;
     if (reminderTimer) clearInterval(reminderTimer);
     reminderTimer = null;
+    if (updateTimer) clearTimeout(updateTimer);
+    updateTimer = null;
     tray?.destroy();
     tray = null;
     getAppLogger().log("info", "app.stopped");

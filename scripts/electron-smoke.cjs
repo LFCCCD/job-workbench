@@ -67,6 +67,27 @@ async function main() {
     unknowns: ["工作方式待确认"],
   };
   const aiServer = http.createServer((request, response) => {
+    if (request.url === "/update") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          tag_name: "v0.2.0-m2",
+          name: "求职工作台 M2 Beta",
+          body: "新增 CRM、托盘提醒和系统健康检查。",
+          html_url: "https://github.com/LFCCCD/job-workbench/releases",
+          published_at: "2026-11-07T00:00:00.000Z",
+          prerelease: true,
+          assets: [
+            {
+              name: "Setup.exe",
+              browser_download_url:
+                "https://github.com/LFCCCD/job-workbench/releases/download/test/Setup.exe",
+            },
+          ],
+        }),
+      );
+      return;
+    }
     if (request.url !== "/v1/chat/completions") {
       response.writeHead(404);
       response.end();
@@ -93,6 +114,7 @@ async function main() {
     throw new Error("Mock AI server did not start");
   }
   const aiBaseUrl = `http://127.0.0.1:${aiAddress.port}/v1`;
+  const updateApiUrl = `http://127.0.0.1:${aiAddress.port}/update`;
   const userData = fs.mkdtempSync(
     path.join(os.tmpdir(), "job-workbench-e2e-"),
   );
@@ -114,6 +136,7 @@ async function main() {
       ...process.env,
       JOB_WORKBENCH_USER_DATA: userData,
       JOB_WORKBENCH_DISABLE_NOTIFICATIONS: "1",
+      JOB_WORKBENCH_UPDATE_API: updateApiUrl,
     },
   });
   app.process().stderr?.on("data", (chunk) => {
@@ -294,9 +317,26 @@ async function main() {
       healthCheck.overall === "error" ||
       !healthCheck.trayActive ||
       healthCheck.schemaVersion !== 7 ||
-      healthCheck.databaseIntegrity !== "ok"
+      healthCheck.databaseIntegrity !== "ok" ||
+      healthCheck.autoLaunchSupported !== Boolean(packagedExecutable)
     ) {
       throw new Error(`Health check failed: ${JSON.stringify(healthCheck)}`);
+    }
+    await page
+      .locator(".system-updates")
+      .getByRole("button", { name: "检查更新" })
+      .click();
+    await page.waitForSelector("text=v0.2.0-m2");
+    const updateHealth = await page.evaluate(() =>
+      window.jobWorkbench.getSystemHealth(),
+    );
+    if (
+      !updateHealth.updateInfo?.available ||
+      updateHealth.updateInfo.latestTag !== "v0.2.0-m2"
+    ) {
+      throw new Error(
+        `Update check failed: ${JSON.stringify(updateHealth.updateInfo)}`,
+      );
     }
     const diagnosticsPath = path.join(userData, "diagnostics-smoke.json");
     await app.evaluate(({ dialog }, filePath) => {

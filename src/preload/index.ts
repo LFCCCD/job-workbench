@@ -126,6 +126,12 @@ const api: JobWorkbenchApi = {
     ipcRenderer.invoke("workbench:open-data-directory"),
   exportDiagnostics: () =>
     ipcRenderer.invoke("workbench:export-diagnostics"),
+  setAutoLaunchEnabled: (enabled: boolean) =>
+    ipcRenderer.invoke("workbench:set-auto-launch", { enabled }),
+  checkForUpdates: (force = false) =>
+    ipcRenderer.invoke("workbench:check-updates", { force }),
+  setUpdateAutoCheck: (enabled: boolean) =>
+    ipcRenderer.invoke("workbench:set-update-auto-check", { enabled }),
   cancelTask: (id: string) =>
     ipcRenderer.invoke("workbench:cancel-task", id),
   retryTask: (id: string) => ipcRenderer.invoke("workbench:retry-task", id),

@@ -8,8 +8,10 @@ import type {
 } from "../shared/contracts";
 import { AiSettingsService } from "./ai-settings";
 import { AppLogger } from "./app-logger";
+import { AutoLaunchService } from "./auto-launch-service";
 import { CollectorBrowserService } from "./collector-browser";
 import { JobDatabase } from "./database";
+import { UpdateService } from "./update-service";
 
 export class HealthService {
   constructor(
@@ -17,6 +19,8 @@ export class HealthService {
     private readonly collectorBrowser: CollectorBrowserService,
     private readonly aiSettings: AiSettingsService,
     private readonly logger: AppLogger,
+    private readonly autoLaunch: AutoLaunchService,
+    private readonly updates: UpdateService,
     private readonly appVersion: string,
     private readonly startedAt: number,
     private readonly isTrayActive: () => boolean,
@@ -44,6 +48,10 @@ export class HealthService {
     const recentBackups = this.listRecentBackups();
     const notificationsEnabled =
       this.database.getAppSetting("notifications.enabled") !== "false";
+    const autoLaunchSupported = this.autoLaunch.isSupported();
+    const autoLaunchEnabled = this.autoLaunch.isEnabled();
+    const autoUpdateCheckEnabled = this.updates.isAutoCheckEnabled();
+    const updateInfo = this.updates.getCached();
     const aiConfigured = ai.provider === "local" || ai.hasApiKey;
     const checks: HealthCheckItem[] = [
       {
@@ -96,6 +104,16 @@ export class HealthService {
           ? `已开启，${crm.metrics.openFollowUps} 个未完成跟进`
           : "系统通知已关闭",
       },
+      {
+        id: "startup-updates",
+        label: "自启与更新",
+        status: autoLaunchSupported ? "ok" : "warning",
+        detail: autoLaunchSupported
+          ? `${autoLaunchEnabled ? "已开启" : "未开启"}开机自启，${
+              autoUpdateCheckEnabled ? "自动检查更新" : "手动检查更新"
+            }`
+          : "开发版不写入开机自启",
+      },
     ];
     const overall = checks.some((check) => check.status === "error")
       ? "error"
@@ -126,6 +144,10 @@ export class HealthService {
       notificationSupported: Notification.isSupported(),
       notificationsEnabled,
       trayActive: this.isTrayActive(),
+      autoLaunchSupported,
+      autoLaunchEnabled,
+      autoUpdateCheckEnabled,
+      updateInfo,
       checks,
     };
   }

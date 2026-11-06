@@ -271,6 +271,13 @@ h1 {
   min-height: auto;
 }
 
+.button-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .view-strip {
   display: flex;
   gap: 8px;
@@ -1716,6 +1723,75 @@ footer {
   overflow-wrap: anywhere;
   color: #718187;
   font-size: 9px;
+}
+
+.startup-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 15px;
+}
+
+.startup-grid .system-toggle {
+  margin-top: 0;
+}
+
+.update-card {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+  gap: 12px;
+  align-items: center;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid #dce7e7;
+  border-radius: 10px;
+  background: #f8fbfa;
+}
+
+.update-card span,
+.update-card strong,
+.update-card small {
+  display: block;
+}
+
+.update-card span,
+.update-card small {
+  color: #718187;
+  font-size: 10px;
+}
+
+.update-card strong {
+  margin-top: 3px;
+}
+
+.release-notes {
+  margin-top: 11px;
+  padding: 10px;
+  border-radius: 9px;
+  background: #f7faf9;
+  font-size: 11px;
+}
+
+.release-notes summary {
+  cursor: pointer;
+}
+
+.release-notes pre {
+  max-height: 240px;
+  overflow: auto;
+  color: #52666c;
+  white-space: pre-wrap;
+  font-family: inherit;
+  line-height: 1.55;
+}
+
+.signing-note {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: #7d5b20;
+  background: #fff5e4;
+  font-size: 10px;
 }
 
 .ai-center {

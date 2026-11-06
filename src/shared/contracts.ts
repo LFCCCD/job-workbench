@@ -417,6 +417,14 @@ export const NotificationSettingSchema = z.object({
   enabled: z.boolean(),
 });
 
+export const UpdateCheckSchema = z.object({
+  force: z.boolean().default(false),
+});
+
+export const AutoLaunchSettingSchema = z.object({
+  enabled: z.boolean(),
+});
+
 export type JobStatus = z.infer<typeof JobStatusSchema>;
 export type ManualJobInput = z.infer<typeof ManualJobSchema>;
 export type MigrationResult = z.infer<typeof MigrationResultSchema>;
@@ -769,7 +777,25 @@ export interface SystemHealth {
   notificationSupported: boolean;
   notificationsEnabled: boolean;
   trayActive: boolean;
+  autoLaunchSupported: boolean;
+  autoLaunchEnabled: boolean;
+  autoUpdateCheckEnabled: boolean;
+  updateInfo: UpdateInfo | null;
   checks: HealthCheckItem[];
+}
+
+export interface UpdateInfo {
+  currentVersion: string;
+  latestVersion: string;
+  latestTag: string;
+  name: string;
+  available: boolean;
+  prerelease: boolean;
+  publishedAt: string;
+  htmlUrl: string;
+  downloadUrl: string;
+  notes: string;
+  checkedAt: string;
 }
 
 export interface ReminderCheckResult {
@@ -878,6 +904,9 @@ export interface JobWorkbenchApi {
   runReminderCheck(): Promise<ReminderCheckResult>;
   openDataDirectory(): Promise<OperationResult>;
   exportDiagnostics(): Promise<string | null>;
+  setAutoLaunchEnabled(enabled: boolean): Promise<OperationResult>;
+  checkForUpdates(force?: boolean): Promise<UpdateInfo>;
+  setUpdateAutoCheck(enabled: boolean): Promise<OperationResult>;
   cancelTask(id: string): Promise<TaskRecord>;
   retryTask(id: string): Promise<TaskRecord>;
   clearFinishedTasks(): Promise<OperationResult>;

@@ -57,6 +57,11 @@ The first milestone proves the complete local desktop path:
 - Due follow-ups are deduplicated per task per day in `notification_deliveries`.
 - Health checks cover SQLite integrity, recent backups, Edge, AI configuration, tasks, and
   reminders. Diagnostics are exported as redacted JSON.
+- Packaged Windows builds can opt into login startup through Electron login-item settings.
+- Update checks read the latest public GitHub Release, cache the result for six hours, and never
+  download or execute an installer automatically.
+- Code signing remains an external release requirement; the application reports the unsigned
+  state rather than creating an untrusted self-signed identity.
 - Daily app logs are retained for 14 days and never include contacts, resume content, cookies,
   API keys, job descriptions, or recruitment chats.
 
