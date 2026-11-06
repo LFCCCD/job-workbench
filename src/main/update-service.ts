@@ -68,7 +68,7 @@ export class UpdateService {
     }
     const endpoint =
       process.env.JOB_WORKBENCH_UPDATE_API ||
-      "https://api.github.com/repos/LFCCCD/job-workbench/releases/latest";
+      "https://api.github.com/repos/LFCCCD/job-workbench/releases?per_page=20";
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15_000);
     try {
@@ -82,7 +82,41 @@ export class UpdateService {
       if (!response.ok) {
         throw new Error(`更新服务返回 HTTP ${response.status}`);
       }
-      const data = (await response.json()) as {
+      const rawData = (await response.json()) as
+        | Array<{
+            tag_name?: string;
+            name?: string;
+            body?: string;
+            html_url?: string;
+            published_at?: string;
+            prerelease?: boolean;
+            draft?: boolean;
+            assets?: Array<{
+              browser_download_url?: string;
+              name?: string;
+            }>;
+          }>
+        | {
+            tag_name?: string;
+            name?: string;
+            body?: string;
+            html_url?: string;
+            published_at?: string;
+            prerelease?: boolean;
+            draft?: boolean;
+            assets?: Array<{
+              browser_download_url?: string;
+              name?: string;
+            }>;
+          };
+      const candidates = Array.isArray(rawData)
+        ? rawData.filter((release) => !release.draft)
+        : [rawData];
+      const data = candidates[0];
+      if (!data) {
+        throw new Error("更新服务没有可用的 Release");
+      }
+      const release = data as {
         tag_name?: string;
         name?: string;
         body?: string;
@@ -91,11 +125,11 @@ export class UpdateService {
         prerelease?: boolean;
         assets?: Array<{ browser_download_url?: string; name?: string }>;
       };
-      const latestTag = String(data.tag_name || "").trim();
+      const latestTag = String(release.tag_name || "").trim();
       if (!latestTag) throw new Error("更新服务没有返回版本号");
       const latestVersion = latestTag.replace(/^v/i, "");
-      const htmlUrl = safeHttpsUrl(data.html_url);
-      const assets = Array.isArray(data.assets) ? data.assets : [];
+      const htmlUrl = safeHttpsUrl(release.html_url);
+      const assets = Array.isArray(release.assets) ? release.assets : [];
       const preferredAsset =
         assets.find((asset) => /\.exe$/i.test(String(asset.name || ""))) ||
         assets[0];
@@ -103,13 +137,13 @@ export class UpdateService {
         currentVersion: this.appVersion,
         latestVersion,
         latestTag,
-        name: String(data.name || latestTag).slice(0, 500),
+        name: String(release.name || latestTag).slice(0, 500),
         available: compareVersions(latestVersion, this.appVersion) > 0,
-        prerelease: Boolean(data.prerelease),
-        publishedAt: String(data.published_at || ""),
+        prerelease: Boolean(release.prerelease),
+        publishedAt: String(release.published_at || ""),
         htmlUrl,
         downloadUrl: safeHttpsUrl(preferredAsset?.browser_download_url),
-        notes: String(data.body || "").slice(0, 20_000),
+        notes: String(release.body || "").slice(0, 20_000),
         checkedAt: new Date().toISOString(),
       };
       this.database.setAppSetting(
