@@ -71,9 +71,9 @@ async function main() {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(
         JSON.stringify({
-          tag_name: "v0.2.0-m2",
-          name: "求职工作台 M2 Beta",
-          body: "新增 CRM、托盘提醒和系统健康检查。",
+          tag_name: "v0.3.0-m3",
+          name: "求职工作台 M3 Test",
+          body: "更新检查冒烟测试版本。",
           html_url: "https://github.com/LFCCCD/job-workbench/releases",
           published_at: "2026-11-07T00:00:00.000Z",
           prerelease: true,
@@ -326,13 +326,13 @@ async function main() {
       .locator(".system-updates")
       .getByRole("button", { name: "检查更新" })
       .click();
-    await page.waitForSelector("text=v0.2.0-m2");
+    await page.waitForSelector("text=v0.3.0-m3");
     const updateHealth = await page.evaluate(() =>
       window.jobWorkbench.getSystemHealth(),
     );
     if (
       !updateHealth.updateInfo?.available ||
-      updateHealth.updateInfo.latestTag !== "v0.2.0-m2"
+      updateHealth.updateInfo.latestTag !== "v0.3.0-m3"
     ) {
       throw new Error(
         `Update check failed: ${JSON.stringify(updateHealth.updateInfo)}`,

@@ -46,16 +46,16 @@ Windows 本地求职管理工具。当前 `feat/m2-data-core` 分支已打通：
 - Windows NSIS 安装包
 
 采集只保存岗位候选，不自动投递、不自动发送招聘消息，也不绕过验证码或风控。
-当前版本仍不包含完整 CRM、多岗位 AI 比较和实时招聘消息。
+当前版本仍不包含多岗位 AI 横向比较、实时招聘消息、云同步和移动端。
 
 ## 下载
 
-[Windows x64 M1 安装程序](https://github.com/LFCCCD/job-workbench/releases/download/v0.1.0-m1/Setup.0.1.0.exe)
+[Windows x64 M2 Beta 安装程序](https://github.com/LFCCCD/job-workbench/releases/download/v0.2.0-m2/Setup.0.2.0-m2.exe)
 
 SHA256：
 
 ```text
-E1D1F3DC3CF45557FF0C04B2AD7FD6D6BA0C0EC081F61E8F768A9D7B151A4D62
+561275A6C935DB5B8C61D8F72AC1EAC950824BC3CE0B2520E24631BEF0B99466
 ```
 
 当前安装包未签名，Windows 可能显示 SmartScreen 提示。
@@ -83,7 +83,7 @@ npm run dist
 
 构建产物：
 
-`release/求职工作台 Setup 0.1.0.exe`
+`release/求职工作台 Setup 0.2.0-m2.exe`
 
 ## 本地数据
 
