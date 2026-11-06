@@ -191,10 +191,76 @@ async function main() {
       path: path.join(__dirname, "..", "artifacts", "smoke-detail.png"),
       fullPage: false,
     });
+    await page.locator("nav").getByRole("button", { name: "跟进" }).click();
+    await page.waitForSelector("text=JOB RELATIONSHIP");
     await page
-      .locator(".detail-panel")
-      .getByRole("button", { name: "AI 分析" })
+      .locator(".top-actions")
+      .getByRole("button", { name: "新增联系人" })
       .click();
+    const contactModal = page.locator(".crm-modal");
+    await contactModal.getByLabel("姓名").fill("招聘老师");
+    await contactModal.getByLabel("角色").fill("HR");
+    await contactModal.getByLabel("联系方式说明").fill("BOSS 站内沟通");
+    await contactModal.getByLabel("备注").fill("已确认接受往届毕业生");
+    await contactModal.getByRole("button", { name: "保存联系人" }).click();
+    await page.locator(".crm-card", { hasText: "招聘老师" }).waitFor();
+
+    await page
+      .locator(".top-actions")
+      .getByRole("button", { name: "新增跟进" })
+      .click();
+    const followModal = page.locator(".crm-modal");
+    await followModal.getByLabel("跟进标题").fill("确认简历是否送达");
+    await followModal.getByLabel("备注").fill("询问招聘进度和下一步安排");
+    await followModal.getByRole("button", { name: "保存跟进" }).click();
+    await page
+      .locator(".crm-timeline-item", { hasText: "确认简历是否送达" })
+      .waitFor();
+
+    await page
+      .locator(".top-actions")
+      .getByRole("button", { name: "新增面试" })
+      .click();
+    const interviewModal = page.locator(".crm-modal");
+    await interviewModal.getByLabel("轮次").fill("一面");
+    await interviewModal.getByLabel("地点 / 会议链接").fill("腾讯会议");
+    await interviewModal
+      .getByLabel("面试问题（每行一条）")
+      .fill("如何排查客户现场问题？");
+    await interviewModal.getByLabel("结果").fill("待面试");
+    await interviewModal.getByLabel("下一步").fill("复习 SQL 和项目实施流程");
+    await interviewModal
+      .getByLabel("复盘")
+      .fill("准备项目交付和客户沟通案例");
+    await interviewModal.getByRole("button", { name: "保存面试" }).click();
+    await page.locator(".interview-card", { hasText: "一面" }).waitFor();
+    const crmCheck = await page.evaluate(async () => {
+      const jobs = await window.jobWorkbench.listJobs({
+        query: "软件实施工程师",
+      });
+      if (!jobs[0]) throw new Error("CRM smoke job not found");
+      const overview = await window.jobWorkbench.getCrmOverview();
+      const workspace = await window.jobWorkbench.getCrmWorkspace(jobs[0].id);
+      return {
+        openFollowUps: overview.metrics.openFollowUps,
+        contacts: workspace.contacts.length,
+        interviews: workspace.interviews.length,
+        eventCount: workspace.events.length,
+      };
+    });
+    if (
+      crmCheck.openFollowUps !== 1 ||
+      crmCheck.contacts !== 1 ||
+      crmCheck.interviews !== 1 ||
+      crmCheck.eventCount < 3
+    ) {
+      throw new Error(`CRM smoke check failed: ${JSON.stringify(crmCheck)}`);
+    }
+    await page.screenshot({
+      path: path.join(__dirname, "..", "artifacts", "smoke-crm.png"),
+      fullPage: true,
+    });
+    await page.locator("nav").getByRole("button", { name: "AI 分析" }).click();
     await page.waitForSelector("text=PROVIDER SETTINGS");
     const credentialCheck = await page.evaluate(async () => {
       await window.jobWorkbench.saveAiSettings({
@@ -303,13 +369,23 @@ async function main() {
       .getByRole("button", { name: "导出 PDF" })
       .click();
     for (let attempt = 0; attempt < 50; attempt += 1) {
-      if (fs.existsSync(resumePdfPath)) break;
+      if (
+        fs.existsSync(resumePdfPath) &&
+        fs.statSync(resumePdfPath).size > 500
+      ) {
+        break;
+      }
       await page.waitForTimeout(100);
     }
     if (!fs.existsSync(resumePdfPath)) {
       throw new Error("Resume PDF was not created");
     }
-    const pdfBytes = fs.readFileSync(resumePdfPath);
+    let pdfBytes = Buffer.alloc(0);
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      pdfBytes = fs.readFileSync(resumePdfPath);
+      if (pdfBytes.subarray(0, 5).toString() === "%PDF-") break;
+      await page.waitForTimeout(100);
+    }
     if (pdfBytes.subarray(0, 5).toString() !== "%PDF-") {
       throw new Error("Resume export did not produce a valid PDF header");
     }

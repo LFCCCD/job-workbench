@@ -21,6 +21,8 @@ import {
   ArchiveJobsSchema,
   CollectorIdsSchema,
   CollectorRequestSchema,
+  CrmDeleteSchema,
+  CrmJobIdSchema,
   JobStatusSchema,
   ListJobsSchema,
   ManualJobSchema,
@@ -29,10 +31,14 @@ import {
   ResumeIdSchema,
   ResumeProfileInputSchema,
   ResumeVerifiedSchema,
+  SaveFollowUpSchema,
+  SaveInterviewSchema,
+  SaveJobContactSchema,
   SaveResumeFactSchema,
   SaveResumeVersionSchema,
   SaveViewSchema,
   SetFavoriteSchema,
+  SetFollowUpStatusSchema,
   UpdateJobSchema,
   UpdateJobStatusSchema,
 } from "../shared/contracts";
@@ -234,6 +240,14 @@ function registerIpc() {
     );
   });
   ipcMain.handle("workbench:ai-usage", async () => {
+    if (!database) {
+      return {
+        todayRemoteCalls: 0,
+        dailyLimit: 20,
+        totalAnalyses: 0,
+        cachedHits: 0,
+      };
+    }
     const settings = await getAiSettingsService().getView();
     return getDatabase().getAiUsage(settings.dailyRequestLimit);
   });
@@ -295,6 +309,83 @@ function registerIpc() {
     return {
       ok: true,
       message: deleted ? "简历版本已删除" : "简历版本不存在",
+    };
+  });
+  ipcMain.handle("workbench:crm-overview", () => {
+    return getDatabase().getCrmOverview();
+  });
+  ipcMain.handle("workbench:crm-workspace", (_event, input) => {
+    const { jobId } = CrmJobIdSchema.parse(input);
+    return getDatabase().getCrmWorkspace(jobId);
+  });
+  ipcMain.handle("workbench:save-contact", (_event, input) => {
+    const { jobId } = CrmJobIdSchema.parse(input);
+    const id =
+      input && typeof input.id === "string" ? String(input.id) : null;
+    const parsed = SaveJobContactSchema.parse({
+      ...(id ? { id } : {}),
+      fields: input?.fields,
+    });
+    return getDatabase().saveJobContact(
+      jobId,
+      parsed.id || null,
+      parsed.fields,
+    );
+  });
+  ipcMain.handle("workbench:delete-contact", (_event, input) => {
+    const { id } = CrmDeleteSchema.parse(input);
+    const deleted = getDatabase().deleteJobContact(id);
+    return {
+      ok: true,
+      message: deleted ? "联系人已删除" : "联系人不存在",
+    };
+  });
+  ipcMain.handle("workbench:save-follow-up", (_event, input) => {
+    const { jobId } = CrmJobIdSchema.parse(input);
+    const id =
+      input && typeof input.id === "string" ? String(input.id) : null;
+    const parsed = SaveFollowUpSchema.parse({
+      ...(id ? { id } : {}),
+      fields: input?.fields,
+    });
+    return getDatabase().saveFollowUp(
+      jobId,
+      parsed.id || null,
+      parsed.fields,
+    );
+  });
+  ipcMain.handle("workbench:set-follow-up-status", (_event, input) => {
+    const parsed = SetFollowUpStatusSchema.parse(input);
+    return getDatabase().setFollowUpStatus(parsed.id, parsed.status);
+  });
+  ipcMain.handle("workbench:delete-follow-up", (_event, input) => {
+    const { id } = CrmDeleteSchema.parse(input);
+    const deleted = getDatabase().deleteFollowUp(id);
+    return {
+      ok: true,
+      message: deleted ? "跟进任务已删除" : "跟进任务不存在",
+    };
+  });
+  ipcMain.handle("workbench:save-interview", (_event, input) => {
+    const { jobId } = CrmJobIdSchema.parse(input);
+    const id =
+      input && typeof input.id === "string" ? String(input.id) : null;
+    const parsed = SaveInterviewSchema.parse({
+      ...(id ? { id } : {}),
+      fields: input?.fields,
+    });
+    return getDatabase().saveInterview(
+      jobId,
+      parsed.id || null,
+      parsed.fields,
+    );
+  });
+  ipcMain.handle("workbench:delete-interview", (_event, input) => {
+    const { id } = CrmDeleteSchema.parse(input);
+    const deleted = getDatabase().deleteInterview(id);
+    return {
+      ok: true,
+      message: deleted ? "面试记录已删除" : "面试记录不存在",
     };
   });
   ipcMain.handle("workbench:cancel-task", (_event, id) => {

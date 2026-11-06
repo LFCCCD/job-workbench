@@ -53,7 +53,7 @@ describe("JobDatabase", () => {
         total: 1,
         active: 1,
         archived: 0,
-        schemaVersion: 5,
+        schemaVersion: 6,
         pendingTasks: 0,
       });
 
@@ -174,6 +174,14 @@ describe("JobDatabase", () => {
         link: "",
         description: "",
       });
+      database.saveJobContact(original.id, null, {
+        name: "备份联系人",
+        role: "HR",
+        channel: "BOSS",
+        contactInfo: "",
+        notes: "",
+        lastContactAt: "",
+      });
       const backupPath = await database.createBackup("restore-source");
       database.addJob({
         title: "备份后新增",
@@ -190,6 +198,9 @@ describe("JobDatabase", () => {
       expect(fs.existsSync(restored.safetyBackup)).toBe(true);
       expect(database.listJobs()).toHaveLength(1);
       expect(database.listJobs()[0].id).toBe(original.id);
+      expect(database.getCrmWorkspace(original.id).contacts[0].name).toBe(
+        "备份联系人",
+      );
     } finally {
       database.close();
     }
@@ -417,6 +428,84 @@ describe("JobDatabase", () => {
     }
   });
 
+  it("manages contacts, follow-ups, interviews and reminder metrics", () => {
+    const root = createRoot();
+    const database = new JobDatabase(root);
+    try {
+      const job = database.addJob({
+        title: "技术支持工程师",
+        company: "CRM测试公司",
+        salary: "7-9K",
+        city: "杭州",
+        link: "",
+        description: "负责客户支持和系统维护。",
+      });
+      const contact = database.saveJobContact(job.id, null, {
+        name: "招聘老师",
+        role: "HR",
+        channel: "BOSS",
+        contactInfo: "BOSS 站内",
+        notes: "已确认接受往届生",
+        lastContactAt: new Date().toISOString(),
+      });
+      expect(contact).toMatchObject({
+        jobId: job.id,
+        name: "招聘老师",
+        channel: "BOSS",
+      });
+
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const overdue = database.saveFollowUp(job.id, null, {
+        title: "确认简历是否送达",
+        dueAt: yesterday.toISOString(),
+        status: "pending",
+        notes: "",
+      });
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      const upcoming = database.saveFollowUp(job.id, null, {
+        title: "询问面试安排",
+        dueAt: tomorrow.toISOString(),
+        status: "pending",
+        notes: "",
+      });
+      expect(database.getCrmOverview().metrics).toMatchObject({
+        overdue: 1,
+        upcomingSevenDays: 1,
+        openFollowUps: 2,
+      });
+      expect(database.getCrmWorkspace(job.id).followUps).toHaveLength(2);
+
+      expect(database.setFollowUpStatus(overdue.id, "completed")).toMatchObject({
+        status: "completed",
+      });
+      const interviewDate = new Date();
+      interviewDate.setDate(interviewDate.getDate() + 3);
+      const interview = database.saveInterview(job.id, null, {
+        round: "一面",
+        scheduledAt: interviewDate.toISOString(),
+        mode: "视频",
+        location: "腾讯会议",
+        questions: ["如何排查客户现场问题？"],
+        reflection: "",
+        result: "待面试",
+        nextStep: "复习 SQL",
+      });
+      expect(interview.round).toBe("一面");
+      expect(database.getCrmOverview().metrics.scheduledInterviews).toBe(1);
+      expect(database.getCrmWorkspace(job.id).events.length).toBeGreaterThan(2);
+
+      expect(database.deleteFollowUp(overdue.id)).toBe(1);
+      expect(database.deleteFollowUp(upcoming.id)).toBe(1);
+      expect(database.deleteInterview(interview.id)).toBe(1);
+      expect(database.deleteJobContact(contact.id)).toBe(1);
+      expect(database.getCrmWorkspace(job.id).followUps).toHaveLength(0);
+    } finally {
+      database.close();
+    }
+  });
+
   it("persists tasks, resumes queued work and clears finished records", async () => {
     const root = createRoot();
     const database = new JobDatabase(root);
@@ -469,7 +558,7 @@ describe("JobDatabase", () => {
           preview.counts.jobs,
         );
         expect(fs.existsSync(result.backupPath)).toBe(true);
-        expect(database.getSchemaVersion()).toBe(5);
+        expect(database.getSchemaVersion()).toBe(6);
       } finally {
         database.close();
       }

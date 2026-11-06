@@ -7,7 +7,15 @@ import type {
   CollectorPreviewData,
   CollectorRequest,
   CollectorStatus,
+  ContactFields,
+  CrmOverview,
+  CrmWorkspace,
   DashboardData,
+  FollowUpFields,
+  FollowUpRecord,
+  FollowUpStatus,
+  InterviewFields,
+  InterviewRecord,
   JobDetail,
   JobFilters,
   JobRecord,
@@ -98,6 +106,11 @@ const viewCopy = {
     title: "简历",
     description: "已核实事实、岗位版本组合与 PDF 导出",
   },
+  followup: {
+    eyebrow: "JOB SEARCH CRM",
+    title: "跟进",
+    description: "联系人、待办提醒、面试安排与沟通时间线",
+  },
   tasks: {
     eyebrow: "TASK CENTER",
     title: "任务中心",
@@ -177,6 +190,56 @@ const emptyResumeVersion: ResumeVersionFields = {
   includeUnverified: false,
 };
 
+function toLocalDateTime(value: string): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (number: number) => String(number).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
+    date.getDate(),
+  )}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function fromLocalDateTime(value: string): string {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
+function defaultFollowUpTime(): string {
+  const date = new Date();
+  date.setDate(date.getDate() + 3);
+  date.setHours(10, 0, 0, 0);
+  return toLocalDateTime(date.toISOString());
+}
+
+const emptyContact: ContactFields = {
+  name: "",
+  role: "",
+  channel: "BOSS",
+  contactInfo: "",
+  notes: "",
+  lastContactAt: "",
+};
+
+const emptyFollowUp: FollowUpFields = {
+  title: "",
+  dueAt: "",
+  status: "pending",
+  notes: "",
+};
+
+const emptyInterview: InterviewFields = {
+  round: "一面",
+  scheduledAt: "",
+  mode: "视频",
+  location: "",
+  questions: [],
+  reflection: "",
+  result: "",
+  nextStep: "",
+};
+
 const emptyEditForm: JobRecordUpdate = {
   title: "",
   company: "",
@@ -213,13 +276,21 @@ function eventLabel(eventType: string): string {
     job_edit: "编辑岗位",
     archived: "移入回收站",
     restored: "恢复岗位",
+    contact_created: "新增联系人",
+    contact_updated: "更新联系人",
+    contact_deleted: "删除联系人",
+    follow_up_saved: "保存跟进",
+    follow_up_status: "跟进状态",
+    follow_up_deleted: "删除跟进",
+    interview_saved: "保存面试",
+    interview_deleted: "删除面试",
   };
   return labels[eventType] || eventType;
 }
 
 export function App() {
   const [view, setView] = useState<
-    "jobs" | "collector" | "ai" | "resume" | "tasks"
+    "jobs" | "collector" | "ai" | "resume" | "followup" | "tasks"
   >("jobs");
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [jobs, setJobs] = useState<JobRecord[]>([]);
@@ -266,6 +337,24 @@ export function App() {
   >("");
   const [selectedResumeVersionId, setSelectedResumeVersionId] =
     useState<string>("");
+  const [allActiveJobs, setAllActiveJobs] = useState<JobRecord[]>([]);
+  const [crmOverview, setCrmOverview] = useState<CrmOverview | null>(null);
+  const [crmWorkspace, setCrmWorkspace] = useState<CrmWorkspace | null>(null);
+  const [selectedCrmJobId, setSelectedCrmJobId] = useState<string | null>(
+    null,
+  );
+  const [contactEditor, setContactEditor] = useState<{
+    id: string | null;
+    fields: ContactFields;
+  } | null>(null);
+  const [followUpEditor, setFollowUpEditor] = useState<{
+    id: string | null;
+    fields: FollowUpFields;
+  } | null>(null);
+  const [interviewEditor, setInterviewEditor] = useState<{
+    id: string | null;
+    fields: InterviewFields;
+  } | null>(null);
   const [collectorRequest, setCollectorRequest] =
     useState<CollectorRequest>(defaultCollectorRequest);
   const [collectorQueriesText, setCollectorQueriesText] = useState(
@@ -299,6 +388,8 @@ export function App() {
       nextAiUsage,
       nextAiAnalyses,
       nextResumeWorkspace,
+      nextAllActiveJobs,
+      nextCrmOverview,
     ] = await Promise.all([
       window.jobWorkbench.getDashboard(),
       window.jobWorkbench.listJobs(nextFilters),
@@ -310,6 +401,8 @@ export function App() {
       window.jobWorkbench.getAiUsage(),
       window.jobWorkbench.listAiAnalyses(),
       window.jobWorkbench.getResumeWorkspace(),
+      window.jobWorkbench.listJobs({ archived: "active" }),
+      window.jobWorkbench.getCrmOverview(),
     ]);
     setDashboard(nextDashboard);
     setJobs(nextJobs);
@@ -321,6 +414,8 @@ export function App() {
     setAiUsage(nextAiUsage);
     setAiAnalyses(nextAiAnalyses);
     setResumeWorkspace(nextResumeWorkspace);
+    setAllActiveJobs(nextAllActiveJobs);
+    setCrmOverview(nextCrmOverview);
     if (nextResumeWorkspace.profile) {
       setResumeProfileForm({
         fullName: nextResumeWorkspace.profile.fullName,
@@ -377,6 +472,17 @@ export function App() {
       ]);
       setAiCurrent(analysis);
       if (jobDetail) setAiSelectedJob(jobDetail.job);
+    }
+    if (
+      selectedCrmJobId &&
+      nextAllActiveJobs.some((job) => job.id === selectedCrmJobId)
+    ) {
+      setCrmWorkspace(
+        await window.jobWorkbench.getCrmWorkspace(selectedCrmJobId),
+      );
+    } else if (selectedCrmJobId) {
+      setSelectedCrmJobId(null);
+      setCrmWorkspace(null);
     }
   }
 
@@ -883,6 +989,182 @@ export function App() {
     });
   }
 
+  async function openCrm(jobId?: string) {
+    const nextJobId =
+      jobId || selectedCrmJobId || allActiveJobs[0]?.id || null;
+    setSelectedCrmJobId(nextJobId);
+    if (nextJobId) {
+      setCrmWorkspace(await window.jobWorkbench.getCrmWorkspace(nextJobId));
+    } else {
+      setCrmWorkspace(null);
+    }
+    setView("followup");
+  }
+
+  function startNewContact() {
+    setContactEditor({
+      id: null,
+      fields: { ...emptyContact, lastContactAt: toLocalDateTime(new Date().toISOString()) },
+    });
+  }
+
+  function editContact(contact: CrmWorkspace["contacts"][number]) {
+    setContactEditor({
+      id: contact.id,
+      fields: {
+        name: contact.name,
+        role: contact.role,
+        channel: contact.channel,
+        contactInfo: contact.contactInfo,
+        notes: contact.notes,
+        lastContactAt: toLocalDateTime(contact.lastContactAt),
+      },
+    });
+  }
+
+  async function saveContact() {
+    if (!contactEditor || !selectedCrmJobId) return;
+    if (!contactEditor.fields.name.trim()) {
+      showMessage("联系人名称不能为空");
+      return;
+    }
+    await runOperation(async () => {
+      await window.jobWorkbench.saveJobContact(
+        selectedCrmJobId,
+        contactEditor.id,
+        {
+          ...contactEditor.fields,
+          lastContactAt: fromLocalDateTime(
+            contactEditor.fields.lastContactAt,
+          ),
+        },
+      );
+      setContactEditor(null);
+      showMessage("联系人已保存");
+    });
+  }
+
+  function startNewFollowUp() {
+    setFollowUpEditor({
+      id: null,
+      fields: {
+        ...emptyFollowUp,
+        title: "确认招聘进度",
+        dueAt: defaultFollowUpTime(),
+      },
+    });
+  }
+
+  function editFollowUp(followUp: FollowUpRecord) {
+    setFollowUpEditor({
+      id: followUp.id,
+      fields: {
+        title: followUp.title,
+        dueAt: toLocalDateTime(followUp.dueAt),
+        status: followUp.status,
+        notes: followUp.notes,
+      },
+    });
+  }
+
+  async function saveFollowUp() {
+    if (!followUpEditor || !selectedCrmJobId) return;
+    if (!followUpEditor.fields.dueAt) {
+      showMessage("请选择跟进时间");
+      return;
+    }
+    await runOperation(async () => {
+      await window.jobWorkbench.saveFollowUp(
+        selectedCrmJobId,
+        followUpEditor.id,
+        {
+          ...followUpEditor.fields,
+          dueAt: fromLocalDateTime(followUpEditor.fields.dueAt),
+        },
+      );
+      setFollowUpEditor(null);
+      showMessage("跟进任务已保存");
+    });
+  }
+
+  async function updateFollowUpStatus(
+    followUp: FollowUpRecord,
+    status: FollowUpStatus,
+  ) {
+    await runOperation(async () => {
+      await window.jobWorkbench.setFollowUpStatus(followUp.id, status);
+      showMessage(status === "completed" ? "跟进已完成" : "跟进状态已更新");
+    });
+  }
+
+  function startNewInterview() {
+    setInterviewEditor({
+      id: null,
+      fields: {
+        ...emptyInterview,
+        scheduledAt: defaultFollowUpTime(),
+      },
+    });
+  }
+
+  function editInterview(interview: InterviewRecord) {
+    setInterviewEditor({
+      id: interview.id,
+      fields: {
+        round: interview.round,
+        scheduledAt: toLocalDateTime(interview.scheduledAt),
+        mode: interview.mode,
+        location: interview.location,
+        questions: [...interview.questions],
+        reflection: interview.reflection,
+        result: interview.result,
+        nextStep: interview.nextStep,
+      },
+    });
+  }
+
+  async function saveInterview() {
+    if (!interviewEditor || !selectedCrmJobId) return;
+    await runOperation(async () => {
+      await window.jobWorkbench.saveInterview(
+        selectedCrmJobId,
+        interviewEditor.id,
+        {
+          ...interviewEditor.fields,
+          scheduledAt: fromLocalDateTime(
+            interviewEditor.fields.scheduledAt,
+          ),
+        },
+      );
+      setInterviewEditor(null);
+      showMessage("面试记录已保存");
+    });
+  }
+
+  async function deleteContact(id: string) {
+    if (!window.confirm("删除这个联系人？")) return;
+    await runOperation(async () => {
+      const result = await window.jobWorkbench.deleteJobContact(id);
+      showMessage(result.message);
+    });
+  }
+
+  async function deleteFollowUp(id: string) {
+    if (!window.confirm("删除这条跟进任务？")) return;
+    await runOperation(async () => {
+      const result = await window.jobWorkbench.deleteFollowUp(id);
+      showMessage(result.message);
+    });
+  }
+
+  async function deleteInterview(id: string) {
+    if (!window.confirm("删除这条面试记录？")) return;
+    await runOperation(async () => {
+      const result = await window.jobWorkbench.deleteInterview(id);
+      showMessage(result.message);
+    });
+  }
+
   async function cancelTask(id: string) {
     await runOperation(async () => {
       await window.jobWorkbench.cancelTask(id);
@@ -942,6 +1224,14 @@ export function App() {
     resumeWorkspace?.facts.filter(
       (fact) => !resumeFactFilter || fact.kind === resumeFactFilter,
     ) || [];
+  const selectedCrmJob =
+    crmWorkspace?.job ||
+    allActiveJobs.find((job) => job.id === selectedCrmJobId) ||
+    null;
+  const pendingCrmFollowUps =
+    crmWorkspace?.followUps.filter(
+      (followUp) => followUp.status === "pending",
+    ) || [];
   const copy = viewCopy[view];
 
   return (
@@ -951,7 +1241,7 @@ export function App() {
           <div className="brand-mark">J</div>
           <div>
             <strong>求职工作台</strong>
-            <small>M2 · Resume & Evidence</small>
+            <small>M2 · Career OS</small>
           </div>
         </div>
         <nav>
@@ -983,12 +1273,20 @@ export function App() {
             简历
           </button>
           <button
+            className={view === "followup" ? "active" : ""}
+            onClick={() => void openCrm()}
+          >
+            跟进
+            {crmOverview?.metrics.overdue ? (
+              <span className="nav-count">{crmOverview.metrics.overdue}</span>
+            ) : null}
+          </button>
+          <button
             className={view === "tasks" ? "active" : ""}
             onClick={() => setView("tasks")}
           >
             任务中心
           </button>
-          <button disabled>跟进</button>
         </nav>
         <div className="sidebar-status">
           <span className="dot" />
@@ -1106,6 +1404,40 @@ export function App() {
                   }
                 >
                   导出当前版本
+                </button>
+              </>
+            ) : view === "followup" ? (
+              <>
+                <button
+                  onClick={() =>
+                    void runOperation(async () => {
+                      setCrmOverview(
+                        await window.jobWorkbench.getCrmOverview(),
+                      );
+                    })
+                  }
+                  disabled={busy}
+                >
+                  刷新提醒
+                </button>
+                <button
+                  onClick={startNewContact}
+                  disabled={busy || !selectedCrmJobId}
+                >
+                  新增联系人
+                </button>
+                <button
+                  onClick={startNewFollowUp}
+                  disabled={busy || !selectedCrmJobId}
+                >
+                  新增跟进
+                </button>
+                <button
+                  className="primary"
+                  onClick={startNewInterview}
+                  disabled={busy || !selectedCrmJobId}
+                >
+                  新增面试
                 </button>
               </>
             ) : (
@@ -2694,6 +3026,354 @@ export function App() {
           </section>
         </section>
 
+        <section hidden={view !== "followup"} className="crm-center">
+          <section className="crm-stats">
+            <article>
+              <span>已逾期</span>
+              <strong className="danger-text">
+                {crmOverview?.metrics.overdue ?? 0}
+              </strong>
+            </article>
+            <article>
+              <span>今天到期</span>
+              <strong>{crmOverview?.metrics.dueToday ?? 0}</strong>
+            </article>
+            <article>
+              <span>未来 7 天</span>
+              <strong>{crmOverview?.metrics.upcomingSevenDays ?? 0}</strong>
+            </article>
+            <article>
+              <span>未完成跟进</span>
+              <strong>{crmOverview?.metrics.openFollowUps ?? 0}</strong>
+            </article>
+            <article>
+              <span>待进行面试</span>
+              <strong>{crmOverview?.metrics.scheduledInterviews ?? 0}</strong>
+            </article>
+          </section>
+
+          <section className="panel crm-agenda-panel">
+            <div className="crm-section-head">
+              <div>
+                <p className="eyebrow">ACTION QUEUE</p>
+                <h2>待办与面试日程</h2>
+                <p className="muted">
+                  按时间排序，点击可直接打开对应岗位跟进记录。
+                </p>
+              </div>
+              <span className="status-badge">
+                未完成 {crmOverview?.metrics.openFollowUps ?? 0}
+              </span>
+            </div>
+            {crmOverview?.agenda.length ? (
+              <div className="crm-agenda-list">
+                {crmOverview.agenda.map((item) => {
+                  const overdue =
+                    item.kind === "follow-up" &&
+                    Date.parse(item.scheduledAt) <
+                      new Date().setHours(0, 0, 0, 0);
+                  return (
+                    <button
+                      className={overdue ? "overdue" : ""}
+                      key={`${item.kind}-${item.id}`}
+                      onClick={() => void openCrm(item.jobId)}
+                    >
+                      <span className="agenda-kind">
+                        {item.kind === "follow-up" ? "跟进" : "面试"}
+                      </span>
+                      <span>
+                        <strong>{item.title}</strong>
+                        <small>
+                          {item.company} · {item.jobTitle}
+                        </small>
+                      </span>
+                      <time>
+                        {new Date(item.scheduledAt).toLocaleString()}
+                      </time>
+                      <span className="agenda-status">{item.status}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="empty crm-empty">
+                <strong>暂无待办</strong>
+                <p>选择岗位后添加跟进或面试日程。</p>
+              </div>
+            )}
+          </section>
+
+          <div className="crm-workspace">
+            <aside className="panel crm-job-picker">
+              <p className="eyebrow">SELECT JOB</p>
+              <h2>选择岗位</h2>
+              {allActiveJobs.length ? (
+                <div className="crm-job-list">
+                  {allActiveJobs.map((job) => (
+                    <button
+                      className={
+                        selectedCrmJobId === job.id ? "active" : ""
+                      }
+                      key={job.id}
+                      onClick={() => void openCrm(job.id)}
+                    >
+                      <strong>{job.title}</strong>
+                      <span>
+                        {job.company} · {job.city || "城市未填"}
+                      </span>
+                      <small>{job.status}</small>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="muted">职位池中还没有岗位。</p>
+              )}
+            </aside>
+
+            <section className="panel crm-detail">
+              {selectedCrmJob && crmWorkspace ? (
+                <>
+                  <div className="crm-detail-head">
+                    <div>
+                      <p className="eyebrow">JOB RELATIONSHIP</p>
+                      <h2>{selectedCrmJob.title}</h2>
+                      <p className="muted">
+                        {selectedCrmJob.company} · {selectedCrmJob.status}
+                      </p>
+                    </div>
+                    <div className="crm-head-actions">
+                      <button onClick={startNewContact} disabled={busy}>
+                        联系人
+                      </button>
+                      <button onClick={startNewFollowUp} disabled={busy}>
+                        跟进
+                      </button>
+                      <button onClick={startNewInterview} disabled={busy}>
+                        面试
+                      </button>
+                    </div>
+                  </div>
+
+                  <section className="crm-block">
+                    <div className="crm-block-head">
+                      <h3>联系人</h3>
+                      <span>{crmWorkspace.contacts.length} 人</span>
+                    </div>
+                    {crmWorkspace.contacts.length ? (
+                      <div className="crm-card-grid">
+                        {crmWorkspace.contacts.map((contact) => (
+                          <article className="crm-card" key={contact.id}>
+                            <div>
+                              <strong>{contact.name}</strong>
+                              <span>{contact.role || "角色未填"}</span>
+                            </div>
+                            <p>
+                              {contact.channel}
+                              {contact.contactInfo
+                                ? ` · ${contact.contactInfo}`
+                                : ""}
+                            </p>
+                            {contact.lastContactAt ? (
+                              <small>
+                                最近联系{" "}
+                                {new Date(
+                                  contact.lastContactAt,
+                                ).toLocaleString()}
+                              </small>
+                            ) : null}
+                            {contact.notes ? <p>{contact.notes}</p> : null}
+                            <div className="crm-card-actions">
+                              <button onClick={() => editContact(contact)}>
+                                编辑
+                              </button>
+                              <button
+                                className="danger"
+                                onClick={() => void deleteContact(contact.id)}
+                                disabled={busy}
+                              >
+                                删除
+                              </button>
+                            </div>
+                          </article>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="crm-empty-line">
+                        还没有联系人，记录招聘者或内推人信息。
+                      </p>
+                    )}
+                  </section>
+
+                  <section className="crm-block">
+                    <div className="crm-block-head">
+                      <h3>跟进任务</h3>
+                      <span>{pendingCrmFollowUps.length} 个待处理</span>
+                    </div>
+                    {crmWorkspace.followUps.length ? (
+                      <div className="crm-timeline-list">
+                        {crmWorkspace.followUps.map((followUp) => {
+                          const overdue =
+                            followUp.status === "pending" &&
+                            Date.parse(followUp.dueAt) < Date.now();
+                          return (
+                            <article
+                              className={`crm-timeline-item follow-${followUp.status} ${
+                                overdue ? "overdue" : ""
+                              }`}
+                              key={followUp.id}
+                            >
+                              <div>
+                                <strong>{followUp.title}</strong>
+                                <span>
+                                  {followUp.status === "pending"
+                                    ? "待处理"
+                                    : followUp.status === "completed"
+                                      ? "已完成"
+                                      : "已取消"}
+                                </span>
+                              </div>
+                              <time>
+                                {new Date(followUp.dueAt).toLocaleString()}
+                              </time>
+                              {followUp.notes ? <p>{followUp.notes}</p> : null}
+                              <div className="crm-card-actions">
+                                {followUp.status === "pending" ? (
+                                  <button
+                                    className="primary"
+                                    onClick={() =>
+                                      void updateFollowUpStatus(
+                                        followUp,
+                                        "completed",
+                                      )
+                                    }
+                                    disabled={busy}
+                                  >
+                                    标记完成
+                                  </button>
+                                ) : (
+                                  <button
+                                    onClick={() =>
+                                      void updateFollowUpStatus(
+                                        followUp,
+                                        "pending",
+                                      )
+                                    }
+                                    disabled={busy}
+                                  >
+                                    重新打开
+                                  </button>
+                                )}
+                                <button onClick={() => editFollowUp(followUp)}>
+                                  编辑
+                                </button>
+                                <button
+                                  className="danger"
+                                  onClick={() =>
+                                    void deleteFollowUp(followUp.id)
+                                  }
+                                  disabled={busy}
+                                >
+                                  删除
+                                </button>
+                              </div>
+                            </article>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="crm-empty-line">
+                        没有跟进任务，建议在沟通或投递后三天设置提醒。
+                      </p>
+                    )}
+                  </section>
+
+                  <section className="crm-block">
+                    <div className="crm-block-head">
+                      <h3>面试记录</h3>
+                      <span>{crmWorkspace.interviews.length} 场</span>
+                    </div>
+                    {crmWorkspace.interviews.length ? (
+                      <div className="interview-list">
+                        {crmWorkspace.interviews.map((interview) => (
+                          <article className="interview-card" key={interview.id}>
+                            <div>
+                              <strong>{interview.round}</strong>
+                              <span>{interview.mode}</span>
+                              {interview.scheduledAt ? (
+                                <time>
+                                  {new Date(
+                                    interview.scheduledAt,
+                                  ).toLocaleString()}
+                                </time>
+                              ) : null}
+                            </div>
+                            {interview.location ? (
+                              <p>地点：{interview.location}</p>
+                            ) : null}
+                            {interview.questions.length ? (
+                              <ul>
+                                {interview.questions.map((question) => (
+                                  <li key={question}>{question}</li>
+                                ))}
+                              </ul>
+                            ) : null}
+                            {interview.result ? (
+                              <p>结果：{interview.result}</p>
+                            ) : null}
+                            {interview.reflection ? (
+                              <p>复盘：{interview.reflection}</p>
+                            ) : null}
+                            {interview.nextStep ? (
+                              <p>下一步：{interview.nextStep}</p>
+                            ) : null}
+                            <div className="crm-card-actions">
+                              <button onClick={() => editInterview(interview)}>
+                                编辑
+                              </button>
+                              <button
+                                className="danger"
+                                onClick={() => void deleteInterview(interview.id)}
+                                disabled={busy}
+                              >
+                                删除
+                              </button>
+                            </div>
+                          </article>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="crm-empty-line">还没有面试记录。</p>
+                    )}
+                  </section>
+
+                  <section className="crm-block">
+                    <div className="crm-block-head">
+                      <h3>操作时间线</h3>
+                      <span>{crmWorkspace.events.length} 条</span>
+                    </div>
+                    <div className="timeline">
+                      {crmWorkspace.events.slice(0, 20).map((event) => (
+                        <div className="timeline-item" key={event.id}>
+                          <strong>{eventLabel(event.eventType)}</strong>
+                          <p>{event.note || "已记录"}</p>
+                          <time>
+                            {new Date(event.createdAt).toLocaleString()}
+                          </time>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                </>
+              ) : (
+                <div className="empty">
+                  <strong>选择一个岗位</strong>
+                  <p>查看联系人、跟进、面试和完整操作时间线。</p>
+                </div>
+              )}
+            </section>
+          </div>
+        </section>
+
         <section hidden={view !== "tasks"} className="panel task-center">
           <div className="task-summary">
             <div>
@@ -3346,6 +4026,396 @@ export function App() {
               </button>
               <button className="primary" type="submit" disabled={busy}>
                 保存版本
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+
+      {contactEditor ? (
+        <div className="modal-backdrop">
+          <form
+            className="modal crm-modal"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveContact();
+            }}
+          >
+            <p className="eyebrow">CONTACT</p>
+            <h2>{contactEditor.id ? "编辑联系人" : "新增联系人"}</h2>
+            <div className="form-row">
+              <label>
+                姓名
+                <input
+                  required
+                  value={contactEditor.fields.name}
+                  onChange={(event) =>
+                    setContactEditor({
+                      ...contactEditor,
+                      fields: {
+                        ...contactEditor.fields,
+                        name: event.target.value,
+                      },
+                    })
+                  }
+                />
+              </label>
+              <label>
+                角色
+                <input
+                  value={contactEditor.fields.role}
+                  placeholder="HR、招聘经理、内推人"
+                  onChange={(event) =>
+                    setContactEditor({
+                      ...contactEditor,
+                      fields: {
+                        ...contactEditor.fields,
+                        role: event.target.value,
+                      },
+                    })
+                  }
+                />
+              </label>
+            </div>
+            <div className="form-row">
+              <label>
+                渠道
+                <select
+                  value={contactEditor.fields.channel}
+                  onChange={(event) =>
+                    setContactEditor({
+                      ...contactEditor,
+                      fields: {
+                        ...contactEditor.fields,
+                        channel: event.target
+                          .value as ContactFields["channel"],
+                      },
+                    })
+                  }
+                >
+                  {["BOSS", "微信", "电话", "邮件", "其他"].map(
+                    (channel) => (
+                      <option key={channel}>{channel}</option>
+                    ),
+                  )}
+                </select>
+              </label>
+              <label>
+                联系方式说明
+                <input
+                  value={contactEditor.fields.contactInfo}
+                  placeholder="只保存必要的联系说明"
+                  onChange={(event) =>
+                    setContactEditor({
+                      ...contactEditor,
+                      fields: {
+                        ...contactEditor.fields,
+                        contactInfo: event.target.value,
+                      },
+                    })
+                  }
+                />
+              </label>
+            </div>
+            <label>
+              最近联系时间
+              <input
+                type="datetime-local"
+                value={contactEditor.fields.lastContactAt}
+                onChange={(event) =>
+                  setContactEditor({
+                    ...contactEditor,
+                    fields: {
+                      ...contactEditor.fields,
+                      lastContactAt: event.target.value,
+                    },
+                  })
+                }
+              />
+            </label>
+            <label>
+              备注
+              <textarea
+                rows={4}
+                value={contactEditor.fields.notes}
+                onChange={(event) =>
+                  setContactEditor({
+                    ...contactEditor,
+                    fields: {
+                      ...contactEditor.fields,
+                      notes: event.target.value,
+                    },
+                  })
+                }
+              />
+            </label>
+            <p className="crm-privacy-note">
+              联系人信息只保存在本机，不会进入 AI 请求。
+            </p>
+            <div className="modal-actions">
+              <button type="button" onClick={() => setContactEditor(null)}>
+                取消
+              </button>
+              <button className="primary" type="submit" disabled={busy}>
+                保存联系人
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+
+      {followUpEditor ? (
+        <div className="modal-backdrop">
+          <form
+            className="modal crm-modal"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveFollowUp();
+            }}
+          >
+            <p className="eyebrow">FOLLOW-UP</p>
+            <h2>{followUpEditor.id ? "编辑跟进" : "新增跟进"}</h2>
+            <label>
+              跟进标题
+              <input
+                required
+                value={followUpEditor.fields.title}
+                onChange={(event) =>
+                  setFollowUpEditor({
+                    ...followUpEditor,
+                    fields: {
+                      ...followUpEditor.fields,
+                      title: event.target.value,
+                    },
+                  })
+                }
+              />
+            </label>
+            <div className="form-row">
+              <label>
+                计划时间
+                <input
+                  required
+                  type="datetime-local"
+                  value={followUpEditor.fields.dueAt}
+                  onChange={(event) =>
+                    setFollowUpEditor({
+                      ...followUpEditor,
+                      fields: {
+                        ...followUpEditor.fields,
+                        dueAt: event.target.value,
+                      },
+                    })
+                  }
+                />
+              </label>
+              <label>
+                状态
+                <select
+                  value={followUpEditor.fields.status}
+                  onChange={(event) =>
+                    setFollowUpEditor({
+                      ...followUpEditor,
+                      fields: {
+                        ...followUpEditor.fields,
+                        status: event.target
+                          .value as FollowUpFields["status"],
+                      },
+                    })
+                  }
+                >
+                  <option value="pending">待处理</option>
+                  <option value="completed">已完成</option>
+                  <option value="cancelled">已取消</option>
+                </select>
+              </label>
+            </div>
+            <label>
+              备注
+              <textarea
+                rows={4}
+                value={followUpEditor.fields.notes}
+                onChange={(event) =>
+                  setFollowUpEditor({
+                    ...followUpEditor,
+                    fields: {
+                      ...followUpEditor.fields,
+                      notes: event.target.value,
+                    },
+                  })
+                }
+              />
+            </label>
+            <div className="modal-actions">
+              <button type="button" onClick={() => setFollowUpEditor(null)}>
+                取消
+              </button>
+              <button className="primary" type="submit" disabled={busy}>
+                保存跟进
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+
+      {interviewEditor ? (
+        <div className="modal-backdrop">
+          <form
+            className="modal crm-modal"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveInterview();
+            }}
+          >
+            <p className="eyebrow">INTERVIEW</p>
+            <h2>{interviewEditor.id ? "编辑面试记录" : "新增面试记录"}</h2>
+            <div className="form-row">
+              <label>
+                轮次
+                <input
+                  required
+                  value={interviewEditor.fields.round}
+                  onChange={(event) =>
+                    setInterviewEditor({
+                      ...interviewEditor,
+                      fields: {
+                        ...interviewEditor.fields,
+                        round: event.target.value,
+                      },
+                    })
+                  }
+                />
+              </label>
+              <label>
+                面试方式
+                <select
+                  value={interviewEditor.fields.mode}
+                  onChange={(event) =>
+                    setInterviewEditor({
+                      ...interviewEditor,
+                      fields: {
+                        ...interviewEditor.fields,
+                        mode: event.target
+                          .value as InterviewFields["mode"],
+                      },
+                    })
+                  }
+                >
+                  <option>现场</option>
+                  <option>电话</option>
+                  <option>视频</option>
+                  <option>其他</option>
+                </select>
+              </label>
+            </div>
+            <div className="form-row">
+              <label>
+                面试时间
+                <input
+                  type="datetime-local"
+                  value={interviewEditor.fields.scheduledAt}
+                  onChange={(event) =>
+                    setInterviewEditor({
+                      ...interviewEditor,
+                      fields: {
+                        ...interviewEditor.fields,
+                        scheduledAt: event.target.value,
+                      },
+                    })
+                  }
+                />
+              </label>
+              <label>
+                地点 / 会议链接
+                <input
+                  value={interviewEditor.fields.location}
+                  onChange={(event) =>
+                    setInterviewEditor({
+                      ...interviewEditor,
+                      fields: {
+                        ...interviewEditor.fields,
+                        location: event.target.value,
+                      },
+                    })
+                  }
+                />
+              </label>
+            </div>
+            <label>
+              面试问题（每行一条）
+              <textarea
+                rows={4}
+                value={interviewEditor.fields.questions.join("\n")}
+                onChange={(event) =>
+                  setInterviewEditor({
+                    ...interviewEditor,
+                    fields: {
+                      ...interviewEditor.fields,
+                      questions: event.target.value
+                        .split(/\r?\n/)
+                        .map((question) => question.trim())
+                        .filter(Boolean),
+                    },
+                  })
+                }
+              />
+            </label>
+            <div className="form-row">
+              <label>
+                结果
+                <input
+                  value={interviewEditor.fields.result}
+                  placeholder="待面试、通过、未通过"
+                  onChange={(event) =>
+                    setInterviewEditor({
+                      ...interviewEditor,
+                      fields: {
+                        ...interviewEditor.fields,
+                        result: event.target.value,
+                      },
+                    })
+                  }
+                />
+              </label>
+              <label>
+                下一步
+                <input
+                  value={interviewEditor.fields.nextStep}
+                  placeholder="准备二面、等待通知"
+                  onChange={(event) =>
+                    setInterviewEditor({
+                      ...interviewEditor,
+                      fields: {
+                        ...interviewEditor.fields,
+                        nextStep: event.target.value,
+                      },
+                    })
+                  }
+                />
+              </label>
+            </div>
+            <label>
+              复盘
+              <textarea
+                rows={4}
+                value={interviewEditor.fields.reflection}
+                onChange={(event) =>
+                  setInterviewEditor({
+                    ...interviewEditor,
+                    fields: {
+                      ...interviewEditor.fields,
+                      reflection: event.target.value,
+                    },
+                  })
+                }
+              />
+            </label>
+            <div className="modal-actions">
+              <button type="button" onClick={() => setInterviewEditor(null)}>
+                取消
+              </button>
+              <button className="primary" type="submit" disabled={busy}>
+                保存面试
               </button>
             </div>
           </form>

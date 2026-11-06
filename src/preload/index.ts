@@ -3,6 +3,10 @@ import type {
   AiAnalyzeRequest,
   AiSettingsInput,
   CollectorRequest,
+  ContactFields,
+  FollowUpFields,
+  FollowUpStatus,
+  InterviewFields,
   JobFilters,
   JobStatus,
   JobWorkbenchApi,
@@ -87,6 +91,32 @@ const api: JobWorkbenchApi = {
     ipcRenderer.invoke("workbench:save-resume-version", { id, fields }),
   deleteResumeVersion: (id: string) =>
     ipcRenderer.invoke("workbench:delete-resume-version", { id }),
+  getCrmOverview: () => ipcRenderer.invoke("workbench:crm-overview"),
+  getCrmWorkspace: (jobId: string) =>
+    ipcRenderer.invoke("workbench:crm-workspace", { jobId }),
+  saveJobContact: (
+    jobId: string,
+    id: string | null,
+    fields: ContactFields,
+  ) => ipcRenderer.invoke("workbench:save-contact", { jobId, id, fields }),
+  deleteJobContact: (id: string) =>
+    ipcRenderer.invoke("workbench:delete-contact", { id }),
+  saveFollowUp: (
+    jobId: string,
+    id: string | null,
+    fields: FollowUpFields,
+  ) => ipcRenderer.invoke("workbench:save-follow-up", { jobId, id, fields }),
+  setFollowUpStatus: (id: string, status: FollowUpStatus) =>
+    ipcRenderer.invoke("workbench:set-follow-up-status", { id, status }),
+  deleteFollowUp: (id: string) =>
+    ipcRenderer.invoke("workbench:delete-follow-up", { id }),
+  saveInterview: (
+    jobId: string,
+    id: string | null,
+    fields: InterviewFields,
+  ) => ipcRenderer.invoke("workbench:save-interview", { jobId, id, fields }),
+  deleteInterview: (id: string) =>
+    ipcRenderer.invoke("workbench:delete-interview", { id }),
   cancelTask: (id: string) =>
     ipcRenderer.invoke("workbench:cancel-task", id),
   retryTask: (id: string) => ipcRenderer.invoke("workbench:retry-task", id),

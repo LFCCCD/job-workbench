@@ -21,7 +21,7 @@ The first milestone proves the complete local desktop path:
 - PDF rendering uses a hidden BrowserWindow and never loads remote resources.
 - Data-layer migration is transactional, checked with `PRAGMA integrity_check`, and preceded by
   a safety backup.
-- `schema_migrations` records schema versions. The current schema version is 5.
+- `schema_migrations` records schema versions. The current schema version is 6.
 - Durable tasks are stored in SQLite with idempotency keys and interrupted-on-restart handling.
 - The task center executes registered task types in the main process, exposes progress and
   errors through IPC, and supports cancel, retry, and finished-record cleanup.
@@ -47,6 +47,11 @@ The first milestone proves the complete local desktop path:
   next PDF export. Deleting a fact transactionally removes its references from all versions.
 - Resume HTML and PDF rendering share one pure renderer with HTML escaping and a version-specific
   fact selection.
+- CRM contacts, follow-ups, and interviews are separate normalized tables with cascading job
+  deletion. Every mutation writes a `job_events` timeline record.
+- The earliest pending follow-up is synchronized to `jobs.next_follow_up_at`; applying or
+  reaching communication states updates the relevant job timestamps.
+- CRM contact data is local-only and is excluded from AI snapshots and prompts.
 
 ## Database decision
 
@@ -56,5 +61,4 @@ to avoid native ABI rebuilds and installer packaging risk.
 
 ## Deferred work
 
-- Full CRM and interview records
 - Auto update and code signing

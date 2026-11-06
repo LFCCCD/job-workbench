@@ -320,6 +320,99 @@ export const ResumeExportRequestSchema = z.object({
   versionId: z.string().min(1).max(100).nullable().default(null),
 });
 
+const OptionalDateStringSchema = z
+  .string()
+  .trim()
+  .max(50)
+  .refine((value) => !value || !Number.isNaN(Date.parse(value)), {
+    message: "日期时间格式无效",
+  });
+
+export const contactChannels = [
+  "BOSS",
+  "微信",
+  "电话",
+  "邮件",
+  "其他",
+] as const;
+
+export const SaveJobContactSchema = z
+  .object({
+    id: z.string().min(1).max(100).optional(),
+    fields: z
+      .object({
+        name: z.string().trim().min(1, "联系人名称不能为空").max(100),
+        role: z.string().trim().max(100).default(""),
+        channel: z.enum(contactChannels).default("BOSS"),
+        contactInfo: z.string().trim().max(500).default(""),
+        notes: z.string().trim().max(5_000).default(""),
+        lastContactAt: OptionalDateStringSchema.default(""),
+      })
+      .strict(),
+  })
+  .strict();
+
+export const followUpStatuses = [
+  "pending",
+  "completed",
+  "cancelled",
+] as const;
+
+export const SaveFollowUpSchema = z
+  .object({
+    id: z.string().min(1).max(100).optional(),
+    fields: z
+      .object({
+        title: z.string().trim().min(1, "跟进标题不能为空").max(200),
+        dueAt: OptionalDateStringSchema.refine(Boolean, "跟进时间不能为空"),
+        status: z.enum(followUpStatuses).default("pending"),
+        notes: z.string().trim().max(5_000).default(""),
+      })
+      .strict(),
+  })
+  .strict();
+
+export const interviewModes = [
+  "现场",
+  "电话",
+  "视频",
+  "其他",
+] as const;
+
+export const SaveInterviewSchema = z
+  .object({
+    id: z.string().min(1).max(100).optional(),
+    fields: z
+      .object({
+        round: z.string().trim().min(1, "面试轮次不能为空").max(100),
+        scheduledAt: OptionalDateStringSchema.default(""),
+        mode: z.enum(interviewModes).default("视频"),
+        location: z.string().trim().max(500).default(""),
+        questions: z
+          .array(z.string().trim().min(1).max(1_000))
+          .max(50)
+          .default([]),
+        reflection: z.string().trim().max(10_000).default(""),
+        result: z.string().trim().max(1_000).default(""),
+        nextStep: z.string().trim().max(2_000).default(""),
+      })
+      .strict(),
+  })
+  .strict();
+
+export const CrmJobIdSchema = z.object({
+  jobId: z.string().min(1).max(500),
+});
+
+export const CrmDeleteSchema = z.object({
+  id: z.string().min(1).max(100),
+});
+
+export const SetFollowUpStatusSchema = z.object({
+  id: z.string().min(1).max(100),
+  status: z.enum(followUpStatuses),
+});
+
 export type JobStatus = z.infer<typeof JobStatusSchema>;
 export type ManualJobInput = z.infer<typeof ManualJobSchema>;
 export type MigrationResult = z.infer<typeof MigrationResultSchema>;
@@ -342,6 +435,12 @@ export type ResumeFactFields = z.infer<
 export type ResumeVersionFields = z.infer<
   typeof SaveResumeVersionSchema
 >["fields"];
+export type ContactChannel = (typeof contactChannels)[number];
+export type ContactFields = z.infer<typeof SaveJobContactSchema>["fields"];
+export type FollowUpStatus = (typeof followUpStatuses)[number];
+export type FollowUpFields = z.infer<typeof SaveFollowUpSchema>["fields"];
+export type InterviewMode = (typeof interviewModes)[number];
+export type InterviewFields = z.infer<typeof SaveInterviewSchema>["fields"];
 
 export interface JobRecord {
   id: string;
@@ -557,6 +656,76 @@ export interface ResumeWorkspace {
   };
 }
 
+export interface JobContactRecord {
+  id: string;
+  jobId: string;
+  name: string;
+  role: string;
+  channel: ContactChannel;
+  contactInfo: string;
+  notes: string;
+  lastContactAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FollowUpRecord {
+  id: string;
+  jobId: string;
+  title: string;
+  dueAt: string;
+  status: FollowUpStatus;
+  notes: string;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface InterviewRecord {
+  id: string;
+  jobId: string;
+  round: string;
+  scheduledAt: string;
+  mode: InterviewMode;
+  location: string;
+  questions: string[];
+  reflection: string;
+  result: string;
+  nextStep: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CrmWorkspace {
+  job: JobRecord;
+  contacts: JobContactRecord[];
+  followUps: FollowUpRecord[];
+  interviews: InterviewRecord[];
+  events: JobEventRecord[];
+}
+
+export interface CrmAgendaItem {
+  kind: "follow-up" | "interview";
+  id: string;
+  jobId: string;
+  jobTitle: string;
+  company: string;
+  title: string;
+  scheduledAt: string;
+  status: string;
+}
+
+export interface CrmOverview {
+  metrics: {
+    overdue: number;
+    dueToday: number;
+    upcomingSevenDays: number;
+    openFollowUps: number;
+    scheduledInterviews: number;
+  };
+  agenda: CrmAgendaItem[];
+}
+
 export type TaskStatus =
   | "queued"
   | "running"
@@ -628,6 +797,30 @@ export interface JobWorkbenchApi {
     fields: ResumeVersionFields,
   ): Promise<ResumeVersionRecord>;
   deleteResumeVersion(id: string): Promise<OperationResult>;
+  getCrmOverview(): Promise<CrmOverview>;
+  getCrmWorkspace(jobId: string): Promise<CrmWorkspace>;
+  saveJobContact(
+    jobId: string,
+    id: string | null,
+    fields: ContactFields,
+  ): Promise<JobContactRecord>;
+  deleteJobContact(id: string): Promise<OperationResult>;
+  saveFollowUp(
+    jobId: string,
+    id: string | null,
+    fields: FollowUpFields,
+  ): Promise<FollowUpRecord>;
+  setFollowUpStatus(
+    id: string,
+    status: FollowUpStatus,
+  ): Promise<FollowUpRecord>;
+  deleteFollowUp(id: string): Promise<OperationResult>;
+  saveInterview(
+    jobId: string,
+    id: string | null,
+    fields: InterviewFields,
+  ): Promise<InterviewRecord>;
+  deleteInterview(id: string): Promise<OperationResult>;
   cancelTask(id: string): Promise<TaskRecord>;
   retryTask(id: string): Promise<TaskRecord>;
   clearFinishedTasks(): Promise<OperationResult>;

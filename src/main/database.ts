@@ -11,6 +11,9 @@ import {
   CollectorCandidateSchema,
   ListJobsSchema,
   ResumeProfileInputSchema,
+  SaveFollowUpSchema,
+  SaveInterviewSchema,
+  SaveJobContactSchema,
   SaveResumeFactSchema,
   SaveResumeVersionSchema,
   resumeFactKinds,
@@ -27,9 +30,20 @@ import type {
   CollectorCandidatePreview,
   CollectorImportResult,
   CollectorPreviewData,
+  ContactChannel,
+  ContactFields,
+  CrmOverview,
+  CrmWorkspace,
   DashboardData,
+  FollowUpFields,
+  FollowUpRecord,
+  FollowUpStatus,
+  InterviewFields,
+  InterviewMode,
+  InterviewRecord,
   JobDetail,
   JobEventRecord,
+  JobContactRecord,
   JobFilters,
   JobRecord,
   JobRecordUpdate,
@@ -76,7 +90,7 @@ const JOB_COLUMNS = `
   last_seen_at, updated_at
 `;
 
-const CURRENT_SCHEMA_VERSION = 5;
+const CURRENT_SCHEMA_VERSION = 6;
 const REQUIRED_TABLES = [
   "jobs",
   "job_events",
@@ -281,6 +295,46 @@ export class JobDatabase {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS job_contacts (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT '',
+        channel TEXT NOT NULL DEFAULT 'BOSS',
+        contact_info TEXT NOT NULL DEFAULT '',
+        notes TEXT NOT NULL DEFAULT '',
+        last_contact_at TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS follow_ups (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        title TEXT NOT NULL,
+        due_at TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        notes TEXT NOT NULL DEFAULT '',
+        completed_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS interviews (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        round TEXT NOT NULL,
+        scheduled_at TEXT NOT NULL DEFAULT '',
+        mode TEXT NOT NULL DEFAULT '视频',
+        location TEXT NOT NULL DEFAULT '',
+        questions_json TEXT NOT NULL DEFAULT '[]',
+        reflection TEXT NOT NULL DEFAULT '',
+        result TEXT NOT NULL DEFAULT '',
+        next_step TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
       CREATE INDEX IF NOT EXISTS idx_jobs_archived ON jobs(archived_at);
       CREATE INDEX IF NOT EXISTS idx_job_events_job ON job_events(job_id, created_at DESC);
@@ -291,6 +345,12 @@ export class JobDatabase {
         ON ai_analyses(job_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_ai_analyses_cache
         ON ai_analyses(cache_key, status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_job_contacts_job
+        ON job_contacts(job_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_follow_ups_due
+        ON follow_ups(status, due_at);
+      CREATE INDEX IF NOT EXISTS idx_interviews_job
+        ON interviews(job_id, scheduled_at);
     `);
 
     this.ensureArchivedColumn();
@@ -399,6 +459,23 @@ export class JobDatabase {
         throw new Error("M4 AI analysis migration prerequisites are missing");
       }
       record.run(5, "ai-analysis-results-and-cache", timestamp);
+    }
+    if (this.getSchemaVersion() < 6) {
+      const tableNames = new Set(
+        (
+          this.db
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .all() as SqlRow[]
+        ).map((row) => String(row.name)),
+      );
+      if (
+        !tableNames.has("job_contacts") ||
+        !tableNames.has("follow_ups") ||
+        !tableNames.has("interviews")
+      ) {
+        throw new Error("M2 CRM migration prerequisites are missing");
+      }
+      record.run(6, "job-contacts-follow-ups-and-interviews", timestamp);
     }
     if (this.getSchemaVersion() > CURRENT_SCHEMA_VERSION) {
       throw new Error("数据库版本高于当前应用版本");
@@ -1097,6 +1174,588 @@ export class JobDatabase {
     return Number(result.changes);
   }
 
+  getCrmWorkspace(jobId: string): CrmWorkspace {
+    const detail = this.getJobDetail(jobId);
+    const contacts = (
+      this.db
+        .prepare(
+          "SELECT * FROM job_contacts WHERE job_id = ? ORDER BY updated_at DESC",
+        )
+        .all(jobId) as SqlRow[]
+    ).map((row) => this.rowToJobContact(row));
+    const followUps = (
+      this.db
+        .prepare(
+          `SELECT * FROM follow_ups
+           WHERE job_id = ?
+           ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, due_at`,
+        )
+        .all(jobId) as SqlRow[]
+    ).map((row) => this.rowToFollowUp(row));
+    const interviews = (
+      this.db
+        .prepare(
+          `SELECT * FROM interviews
+           WHERE job_id = ?
+           ORDER BY scheduled_at DESC, created_at DESC`,
+        )
+        .all(jobId) as SqlRow[]
+    ).map((row) => this.rowToInterview(row));
+    return {
+      job: detail.job,
+      contacts,
+      followUps,
+      interviews,
+      events: detail.events,
+    };
+  }
+
+  getCrmOverview(): CrmOverview {
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const startOfToday = new Date(now);
+    startOfToday.setHours(0, 0, 0, 0);
+    const startOfTomorrow = new Date(startOfToday);
+    startOfTomorrow.setDate(startOfTomorrow.getDate() + 1);
+    const inSevenDays = new Date(startOfTomorrow);
+    inSevenDays.setDate(inSevenDays.getDate() + 7);
+    const count = (sql: string, ...params: Array<string | number>) =>
+      Number(
+        (this.db.prepare(sql).get(...params) as SqlRow | undefined)?.count || 0,
+      );
+    const metrics = {
+      overdue: count(
+        "SELECT COUNT(*) AS count FROM follow_ups WHERE status = 'pending' AND due_at < ?",
+        startOfToday.toISOString(),
+      ),
+      dueToday: count(
+        `SELECT COUNT(*) AS count FROM follow_ups
+         WHERE status = 'pending' AND due_at >= ? AND due_at < ?`,
+        startOfToday.toISOString(),
+        startOfTomorrow.toISOString(),
+      ),
+      upcomingSevenDays: count(
+        `SELECT COUNT(*) AS count FROM follow_ups
+         WHERE status = 'pending' AND due_at >= ? AND due_at < ?`,
+        startOfTomorrow.toISOString(),
+        inSevenDays.toISOString(),
+      ),
+      openFollowUps: count(
+        "SELECT COUNT(*) AS count FROM follow_ups WHERE status = 'pending'",
+      ),
+      scheduledInterviews: count(
+        "SELECT COUNT(*) AS count FROM interviews WHERE scheduled_at >= ?",
+        nowIso,
+      ),
+    };
+    const followUpRows = this.db
+      .prepare(`
+        SELECT follow.id, follow.job_id, follow.title, follow.due_at,
+               follow.status, job.title AS job_title, job.company
+        FROM follow_ups AS follow
+        JOIN jobs AS job ON job.id = follow.job_id
+        WHERE follow.status = 'pending'
+        ORDER BY follow.due_at
+        LIMIT 50
+      `)
+      .all() as SqlRow[];
+    const interviewRows = this.db
+      .prepare(`
+        SELECT interview.id, interview.job_id, interview.round,
+               interview.scheduled_at, interview.mode,
+               job.title AS job_title, job.company
+        FROM interviews AS interview
+        JOIN jobs AS job ON job.id = interview.job_id
+        WHERE interview.scheduled_at >= ?
+        ORDER BY interview.scheduled_at
+        LIMIT 30
+      `)
+      .all(nowIso) as SqlRow[];
+    const agenda = [
+      ...followUpRows.map(
+        (row): CrmOverview["agenda"][number] => ({
+          kind: "follow-up",
+          id: String(row.id),
+          jobId: String(row.job_id),
+          jobTitle: String(row.job_title),
+          company: String(row.company),
+          title: String(row.title),
+          scheduledAt: String(row.due_at),
+          status: String(row.status),
+        }),
+      ),
+      ...interviewRows.map(
+        (row): CrmOverview["agenda"][number] => ({
+          kind: "interview",
+          id: String(row.id),
+          jobId: String(row.job_id),
+          jobTitle: String(row.job_title),
+          company: String(row.company),
+          title: String(row.round),
+          scheduledAt: String(row.scheduled_at),
+          status: String(row.mode),
+        }),
+      ),
+    ]
+      .sort(
+        (left, right) =>
+          Date.parse(left.scheduledAt) - Date.parse(right.scheduledAt),
+      )
+      .slice(0, 30);
+    return { metrics, agenda };
+  }
+
+  saveJobContact(
+    jobId: string,
+    id: string | null,
+    fields: ContactFields,
+  ): JobContactRecord {
+    if (!this.getJob(jobId)) throw new Error("岗位不存在");
+    const parsed = SaveJobContactSchema.parse({
+      ...(id ? { id } : {}),
+      fields,
+    });
+    const contactId = id || `contact-${randomUUID()}`;
+    const timestamp = new Date().toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (id) {
+        const existing = this.db
+          .prepare("SELECT job_id FROM job_contacts WHERE id = ?")
+          .get(id) as SqlRow | undefined;
+        if (!existing || String(existing.job_id) !== jobId) {
+          throw new Error("联系人不存在或不属于当前岗位");
+        }
+        this.db
+          .prepare(`
+            UPDATE job_contacts SET
+              name = ?, role = ?, channel = ?, contact_info = ?, notes = ?,
+              last_contact_at = ?, updated_at = ?
+            WHERE id = ?
+          `)
+          .run(
+            parsed.fields.name,
+            parsed.fields.role,
+            parsed.fields.channel,
+            parsed.fields.contactInfo,
+            parsed.fields.notes,
+            parsed.fields.lastContactAt,
+            timestamp,
+            id,
+          );
+      } else {
+        this.db
+          .prepare(`
+            INSERT INTO job_contacts (
+              id, job_id, name, role, channel, contact_info, notes,
+              last_contact_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `)
+          .run(
+            contactId,
+            jobId,
+            parsed.fields.name,
+            parsed.fields.role,
+            parsed.fields.channel,
+            parsed.fields.contactInfo,
+            parsed.fields.notes,
+            parsed.fields.lastContactAt,
+            timestamp,
+            timestamp,
+          );
+      }
+      if (parsed.fields.lastContactAt) {
+        this.db
+          .prepare(`
+            UPDATE jobs SET
+              contacted_at = CASE
+                WHEN contacted_at IS NULL OR contacted_at < ? THEN ?
+                ELSE contacted_at
+              END,
+              updated_at = ?
+            WHERE id = ?
+          `)
+          .run(
+            parsed.fields.lastContactAt,
+            parsed.fields.lastContactAt,
+            timestamp,
+            jobId,
+          );
+      }
+      this.insertCrmEvent(
+        jobId,
+        id ? "contact_updated" : "contact_created",
+        `联系人：${parsed.fields.name}`,
+        timestamp,
+      );
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    const row = this.db
+      .prepare("SELECT * FROM job_contacts WHERE id = ?")
+      .get(contactId) as SqlRow;
+    return this.rowToJobContact(row);
+  }
+
+  deleteJobContact(id: string): number {
+    const row = this.db
+      .prepare("SELECT job_id, name FROM job_contacts WHERE id = ?")
+      .get(id) as SqlRow | undefined;
+    if (!row) return 0;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.db
+        .prepare("DELETE FROM job_contacts WHERE id = ?")
+        .run(id);
+      this.insertCrmEvent(
+        String(row.job_id),
+        "contact_deleted",
+        `删除联系人：${String(row.name)}`,
+        new Date().toISOString(),
+      );
+      this.db.exec("COMMIT");
+      return Number(result.changes);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  saveFollowUp(
+    jobId: string,
+    id: string | null,
+    fields: FollowUpFields,
+  ): FollowUpRecord {
+    if (!this.getJob(jobId)) throw new Error("岗位不存在");
+    const parsed = SaveFollowUpSchema.parse({
+      ...(id ? { id } : {}),
+      fields,
+    });
+    const followUpId = id || `follow-${randomUUID()}`;
+    const timestamp = new Date().toISOString();
+    const completedAt =
+      parsed.fields.status === "completed" ? timestamp : null;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (id) {
+        const existing = this.db
+          .prepare("SELECT job_id FROM follow_ups WHERE id = ?")
+          .get(id) as SqlRow | undefined;
+        if (!existing || String(existing.job_id) !== jobId) {
+          throw new Error("跟进任务不存在或不属于当前岗位");
+        }
+        this.db
+          .prepare(`
+            UPDATE follow_ups SET
+              title = ?, due_at = ?, status = ?, notes = ?,
+              completed_at = ?, updated_at = ?
+            WHERE id = ?
+          `)
+          .run(
+            parsed.fields.title,
+            parsed.fields.dueAt,
+            parsed.fields.status,
+            parsed.fields.notes,
+            completedAt,
+            timestamp,
+            id,
+          );
+      } else {
+        this.db
+          .prepare(`
+            INSERT INTO follow_ups (
+              id, job_id, title, due_at, status, notes, completed_at,
+              created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `)
+          .run(
+            followUpId,
+            jobId,
+            parsed.fields.title,
+            parsed.fields.dueAt,
+            parsed.fields.status,
+            parsed.fields.notes,
+            completedAt,
+            timestamp,
+            timestamp,
+          );
+      }
+      this.refreshNextFollowUp(jobId);
+      this.insertCrmEvent(
+        jobId,
+        "follow_up_saved",
+        `跟进：${parsed.fields.title}`,
+        timestamp,
+      );
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    const row = this.db
+      .prepare("SELECT * FROM follow_ups WHERE id = ?")
+      .get(followUpId) as SqlRow;
+    return this.rowToFollowUp(row);
+  }
+
+  setFollowUpStatus(id: string, status: FollowUpStatus): FollowUpRecord {
+    const row = this.db
+      .prepare("SELECT job_id, title FROM follow_ups WHERE id = ?")
+      .get(id) as SqlRow | undefined;
+    if (!row) throw new Error("跟进任务不存在");
+    const timestamp = new Date().toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db
+        .prepare(`
+          UPDATE follow_ups SET
+            status = ?, completed_at = ?, updated_at = ?
+          WHERE id = ?
+        `)
+        .run(
+          status,
+          status === "completed" ? timestamp : null,
+          timestamp,
+          id,
+        );
+      this.refreshNextFollowUp(String(row.job_id));
+      this.insertCrmEvent(
+        String(row.job_id),
+        "follow_up_status",
+        `跟进“${String(row.title)}”状态：${status}`,
+        timestamp,
+      );
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    const updated = this.db
+      .prepare("SELECT * FROM follow_ups WHERE id = ?")
+      .get(id) as SqlRow;
+    return this.rowToFollowUp(updated);
+  }
+
+  deleteFollowUp(id: string): number {
+    const row = this.db
+      .prepare("SELECT job_id, title FROM follow_ups WHERE id = ?")
+      .get(id) as SqlRow | undefined;
+    if (!row) return 0;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.db
+        .prepare("DELETE FROM follow_ups WHERE id = ?")
+        .run(id);
+      this.refreshNextFollowUp(String(row.job_id));
+      this.insertCrmEvent(
+        String(row.job_id),
+        "follow_up_deleted",
+        `删除跟进：${String(row.title)}`,
+        new Date().toISOString(),
+      );
+      this.db.exec("COMMIT");
+      return Number(result.changes);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  saveInterview(
+    jobId: string,
+    id: string | null,
+    fields: InterviewFields,
+  ): InterviewRecord {
+    if (!this.getJob(jobId)) throw new Error("岗位不存在");
+    const parsed = SaveInterviewSchema.parse({
+      ...(id ? { id } : {}),
+      fields,
+    });
+    const interviewId = id || `interview-${randomUUID()}`;
+    const timestamp = new Date().toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (id) {
+        const existing = this.db
+          .prepare("SELECT job_id FROM interviews WHERE id = ?")
+          .get(id) as SqlRow | undefined;
+        if (!existing || String(existing.job_id) !== jobId) {
+          throw new Error("面试记录不存在或不属于当前岗位");
+        }
+        this.db
+          .prepare(`
+            UPDATE interviews SET
+              round = ?, scheduled_at = ?, mode = ?, location = ?,
+              questions_json = ?, reflection = ?, result = ?, next_step = ?,
+              updated_at = ?
+            WHERE id = ?
+          `)
+          .run(
+            parsed.fields.round,
+            parsed.fields.scheduledAt,
+            parsed.fields.mode,
+            parsed.fields.location,
+            JSON.stringify(parsed.fields.questions),
+            parsed.fields.reflection,
+            parsed.fields.result,
+            parsed.fields.nextStep,
+            timestamp,
+            id,
+          );
+      } else {
+        this.db
+          .prepare(`
+            INSERT INTO interviews (
+              id, job_id, round, scheduled_at, mode, location,
+              questions_json, reflection, result, next_step,
+              created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `)
+          .run(
+            interviewId,
+            jobId,
+            parsed.fields.round,
+            parsed.fields.scheduledAt,
+            parsed.fields.mode,
+            parsed.fields.location,
+            JSON.stringify(parsed.fields.questions),
+            parsed.fields.reflection,
+            parsed.fields.result,
+            parsed.fields.nextStep,
+            timestamp,
+            timestamp,
+          );
+      }
+      this.insertCrmEvent(
+        jobId,
+        "interview_saved",
+        `面试：${parsed.fields.round}`,
+        timestamp,
+      );
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    const row = this.db
+      .prepare("SELECT * FROM interviews WHERE id = ?")
+      .get(interviewId) as SqlRow;
+    return this.rowToInterview(row);
+  }
+
+  deleteInterview(id: string): number {
+    const row = this.db
+      .prepare("SELECT job_id, round FROM interviews WHERE id = ?")
+      .get(id) as SqlRow | undefined;
+    if (!row) return 0;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.db
+        .prepare("DELETE FROM interviews WHERE id = ?")
+        .run(id);
+      this.insertCrmEvent(
+        String(row.job_id),
+        "interview_deleted",
+        `删除面试：${String(row.round)}`,
+        new Date().toISOString(),
+      );
+      this.db.exec("COMMIT");
+      return Number(result.changes);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private insertCrmEvent(
+    jobId: string,
+    eventType: string,
+    note: string,
+    timestamp: string,
+  ) {
+    this.db
+      .prepare(`
+        INSERT INTO job_events (
+          job_id, event_type, from_status, to_status, note, created_at
+        ) VALUES (?, ?, NULL, NULL, ?, ?)
+      `)
+      .run(jobId, eventType, note, timestamp);
+  }
+
+  private refreshNextFollowUp(jobId: string) {
+    this.db
+      .prepare(`
+        UPDATE jobs SET
+          next_follow_up_at = (
+            SELECT MIN(due_at) FROM follow_ups
+            WHERE job_id = ? AND status = 'pending'
+          ),
+          updated_at = ?
+        WHERE id = ?
+      `)
+      .run(jobId, new Date().toISOString(), jobId);
+  }
+
+  private rowToJobContact(row: SqlRow): JobContactRecord {
+    const channels: ContactChannel[] = [
+      "BOSS",
+      "微信",
+      "电话",
+      "邮件",
+      "其他",
+    ];
+    const channel = String(row.channel || "") as ContactChannel;
+    return {
+      id: String(row.id),
+      jobId: String(row.job_id),
+      name: String(row.name || ""),
+      role: String(row.role || ""),
+      channel: channels.includes(channel) ? channel : "其他",
+      contactInfo: String(row.contact_info || ""),
+      notes: String(row.notes || ""),
+      lastContactAt: String(row.last_contact_at || ""),
+      createdAt: String(row.created_at || ""),
+      updatedAt: String(row.updated_at || ""),
+    };
+  }
+
+  private rowToFollowUp(row: SqlRow): FollowUpRecord {
+    return {
+      id: String(row.id),
+      jobId: String(row.job_id),
+      title: String(row.title || ""),
+      dueAt: String(row.due_at || ""),
+      status: String(row.status || "pending") as FollowUpStatus,
+      notes: String(row.notes || ""),
+      completedAt: row.completed_at ? String(row.completed_at) : null,
+      createdAt: String(row.created_at || ""),
+      updatedAt: String(row.updated_at || ""),
+    };
+  }
+
+  private rowToInterview(row: SqlRow): InterviewRecord {
+    const modes: InterviewMode[] = ["现场", "电话", "视频", "其他"];
+    const mode = String(row.mode || "") as InterviewMode;
+    return {
+      id: String(row.id),
+      jobId: String(row.job_id),
+      round: String(row.round || ""),
+      scheduledAt: String(row.scheduled_at || ""),
+      mode: modes.includes(mode) ? mode : "其他",
+      location: String(row.location || ""),
+      questions: JSON.parse(
+        String(row.questions_json || "[]"),
+      ) as string[],
+      reflection: String(row.reflection || ""),
+      result: String(row.result || ""),
+      nextStep: String(row.next_step || ""),
+      createdAt: String(row.created_at || ""),
+      updatedAt: String(row.updated_at || ""),
+    };
+  }
+
   private rowToAiAnalysis(row: SqlRow): AiAnalysisRecord {
     let result: AiAnalysisResult | null = null;
     const resultJson = String(row.result_json || "");
@@ -1487,8 +2146,31 @@ export class JobDatabase {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db
-        .prepare("UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?")
-        .run(status, timestamp, id);
+        .prepare(`
+          UPDATE jobs SET
+            status = ?,
+            contacted_at = CASE
+              WHEN ? IN ('已沟通', '已投递', '已回复', '面试')
+                AND contacted_at IS NULL
+              THEN ?
+              ELSE contacted_at
+            END,
+            applied_at = CASE
+              WHEN ? = '已投递' AND applied_at IS NULL THEN ?
+              ELSE applied_at
+            END,
+            updated_at = ?
+          WHERE id = ?
+        `)
+        .run(
+          status,
+          status,
+          timestamp,
+          status,
+          timestamp,
+          timestamp,
+          id,
+        );
       this.db
         .prepare(`
           INSERT INTO job_events (
@@ -1743,6 +2425,43 @@ export class JobDatabase {
             "created_at",
             "updated_at",
           ],
+          job_contacts: [
+            "id",
+            "job_id",
+            "name",
+            "role",
+            "channel",
+            "contact_info",
+            "notes",
+            "last_contact_at",
+            "created_at",
+            "updated_at",
+          ],
+          follow_ups: [
+            "id",
+            "job_id",
+            "title",
+            "due_at",
+            "status",
+            "notes",
+            "completed_at",
+            "created_at",
+            "updated_at",
+          ],
+          interviews: [
+            "id",
+            "job_id",
+            "round",
+            "scheduled_at",
+            "mode",
+            "location",
+            "questions_json",
+            "reflection",
+            "result",
+            "next_step",
+            "created_at",
+            "updated_at",
+          ],
         })) {
           if (!sourceTables.has(table)) continue;
           const rows = source
@@ -1808,6 +2527,9 @@ export class JobDatabase {
 
       this.db.exec("BEGIN IMMEDIATE");
       try {
+        this.db.exec("DELETE FROM job_contacts");
+        this.db.exec("DELETE FROM follow_ups");
+        this.db.exec("DELETE FROM interviews");
         this.db.exec("DELETE FROM job_events");
         this.db.exec("DELETE FROM jobs");
         this.db.exec("DELETE FROM resume_facts");
@@ -1829,6 +2551,9 @@ export class JobDatabase {
           "collector_candidates",
           "collector_cache",
           "ai_analyses",
+          "job_contacts",
+          "follow_ups",
+          "interviews",
         ]) {
           if (!sourceTables.has(table)) continue;
           const target = targetColumns(table);
