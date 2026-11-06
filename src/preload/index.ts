@@ -38,6 +38,14 @@ const api: JobWorkbenchApi = {
     ipcRenderer.invoke("workbench:confirm-migration"),
   chooseAndRestore: () => ipcRenderer.invoke("workbench:restore-backup"),
   createBackup: () => ipcRenderer.invoke("workbench:create-backup"),
+  listTasks: () => ipcRenderer.invoke("workbench:list-tasks"),
+  createBackupTask: () =>
+    ipcRenderer.invoke("workbench:create-backup-task"),
+  cancelTask: (id: string) =>
+    ipcRenderer.invoke("workbench:cancel-task", id),
+  retryTask: (id: string) => ipcRenderer.invoke("workbench:retry-task", id),
+  clearFinishedTasks: () =>
+    ipcRenderer.invoke("workbench:clear-finished-tasks"),
   exportResumePdf: () => ipcRenderer.invoke("workbench:export-resume"),
 };
 

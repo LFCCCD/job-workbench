@@ -200,6 +200,11 @@ export interface JobWorkbenchApi {
   confirmLegacyMigration(): Promise<MigrationResult>;
   chooseAndRestore(): Promise<RestoreResult | null>;
   createBackup(): Promise<string>;
+  listTasks(): Promise<TaskRecord[]>;
+  createBackupTask(): Promise<TaskRecord>;
+  cancelTask(id: string): Promise<TaskRecord>;
+  retryTask(id: string): Promise<TaskRecord>;
+  clearFinishedTasks(): Promise<OperationResult>;
   exportResumePdf(): Promise<string | null>;
 }
 

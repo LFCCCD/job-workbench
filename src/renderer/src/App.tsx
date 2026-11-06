@@ -9,6 +9,7 @@ import type {
   ManualJobInput,
   MigrationPreview,
   SavedView,
+  TaskRecord,
 } from "../../shared/contracts";
 import { jobStatuses } from "../../shared/contracts";
 
@@ -28,6 +29,22 @@ const defaultFilters: JobFilters = {
   favoriteOnly: false,
   archived: "active",
   sort: "updated",
+};
+
+const finishedTaskStatuses = new Set([
+  "succeeded",
+  "failed",
+  "cancelled",
+  "interrupted",
+]);
+
+const taskStatusLabels: Record<TaskRecord["status"], string> = {
+  queued: "排队中",
+  running: "运行中",
+  succeeded: "已完成",
+  failed: "失败",
+  cancelled: "已取消",
+  interrupted: "已中断",
 };
 
 const emptyEditForm: JobRecordUpdate = {
@@ -71,10 +88,12 @@ function eventLabel(eventType: string): string {
 }
 
 export function App() {
+  const [view, setView] = useState<"jobs" | "tasks">("jobs");
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [filters, setFilters] = useState<JobFilters>(defaultFilters);
   const [views, setViews] = useState<SavedView[]>([]);
+  const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [selectedViewId, setSelectedViewId] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
@@ -89,14 +108,16 @@ export function App() {
   const [busy, setBusy] = useState(false);
 
   async function refresh(nextFilters = filters) {
-    const [nextDashboard, nextJobs, nextViews] = await Promise.all([
+    const [nextDashboard, nextJobs, nextViews, nextTasks] = await Promise.all([
       window.jobWorkbench.getDashboard(),
       window.jobWorkbench.listJobs(nextFilters),
       window.jobWorkbench.listSavedViews(),
+      window.jobWorkbench.listTasks(),
     ]);
     setDashboard(nextDashboard);
     setJobs(nextJobs);
     setViews(nextViews);
+    setTasks(nextTasks);
     setSelected((current) => {
       const available = new Set(nextJobs.map((job) => job.id));
       return new Set([...current].filter((id) => available.has(id)));
@@ -115,6 +136,26 @@ export function App() {
   useEffect(() => {
     refresh().catch((error) => showMessage(String(error)));
   }, []);
+
+  useEffect(() => {
+    if (
+      !tasks.some(
+        (task) => task.status === "queued" || task.status === "running",
+      )
+    ) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void Promise.all([
+        window.jobWorkbench.listTasks(),
+        window.jobWorkbench.getDashboard(),
+      ]).then(([nextTasks, nextDashboard]) => {
+        setTasks(nextTasks);
+        setDashboard(nextDashboard);
+      });
+    }, 800);
+    return () => window.clearInterval(timer);
+  }, [tasks]);
 
   function showMessage(text: string) {
     setMessage(text);
@@ -280,8 +321,30 @@ export function App() {
 
   async function backup() {
     await runOperation(async () => {
-      const destination = await window.jobWorkbench.createBackup();
-      showMessage(`备份已创建：${destination}`);
+      await window.jobWorkbench.createBackupTask();
+      setView("tasks");
+      showMessage("备份任务已创建");
+    });
+  }
+
+  async function cancelTask(id: string) {
+    await runOperation(async () => {
+      await window.jobWorkbench.cancelTask(id);
+      showMessage("任务已取消");
+    });
+  }
+
+  async function retryTask(id: string) {
+    await runOperation(async () => {
+      await window.jobWorkbench.retryTask(id);
+      showMessage("任务已重新排队");
+    });
+  }
+
+  async function clearFinishedTasks() {
+    await runOperation(async () => {
+      const result = await window.jobWorkbench.clearFinishedTasks();
+      showMessage(result.message);
     });
   }
 
@@ -308,7 +371,18 @@ export function App() {
           </div>
         </div>
         <nav>
-          <button className="active">职位池</button>
+          <button
+            className={view === "jobs" ? "active" : ""}
+            onClick={() => setView("jobs")}
+          >
+            职位池
+          </button>
+          <button
+            className={view === "tasks" ? "active" : ""}
+            onClick={() => setView("tasks")}
+          >
+            任务中心
+          </button>
           <button disabled>AI 分析</button>
           <button disabled>简历</button>
           <button disabled>跟进</button>
@@ -322,29 +396,52 @@ export function App() {
       <main>
         <header className="topbar">
           <div>
-            <p className="eyebrow">JOB PIPELINE</p>
-            <h1>职位池</h1>
-            <p className="muted">筛选、详情、收藏、状态时间线与回收站</p>
+            <p className="eyebrow">
+              {view === "jobs" ? "JOB PIPELINE" : "TASK CENTER"}
+            </p>
+            <h1>{view === "jobs" ? "职位池" : "任务中心"}</h1>
+            <p className="muted">
+              {view === "jobs"
+                ? "筛选、详情、收藏、状态时间线与回收站"
+                : "持久化任务、进度、取消、重试与重启恢复"}
+            </p>
           </div>
           <div className="top-actions">
-            <button onClick={() => void migrate()} disabled={busy}>
-              迁移数据库
-            </button>
-            <button onClick={() => void backup()} disabled={busy}>
-              创建备份
-            </button>
-            <button onClick={() => void restoreBackup()} disabled={busy}>
-              恢复备份
-            </button>
-            <button onClick={() => void exportResume()} disabled={busy}>
-              导出简历 PDF
-            </button>
-            <button className="primary" onClick={() => setShowAddDialog(true)}>
-              手动添加岗位
-            </button>
+            {view === "jobs" ? (
+              <>
+                <button onClick={() => void migrate()} disabled={busy}>
+                  迁移数据库
+                </button>
+                <button onClick={() => void backup()} disabled={busy}>
+                  后台备份
+                </button>
+                <button onClick={() => void restoreBackup()} disabled={busy}>
+                  恢复备份
+                </button>
+                <button onClick={() => void exportResume()} disabled={busy}>
+                  导出简历 PDF
+                </button>
+                <button
+                  className="primary"
+                  onClick={() => setShowAddDialog(true)}
+                >
+                  手动添加岗位
+                </button>
+              </>
+            ) : (
+              <>
+                <button onClick={() => void backup()} disabled={busy}>
+                  新建备份任务
+                </button>
+                <button onClick={() => void clearFinishedTasks()} disabled={busy}>
+                  清理已完成记录
+                </button>
+              </>
+            )}
           </div>
         </header>
 
+        <div hidden={view !== "jobs"}>
         <section className="metrics">
           <article>
             <span>岗位总数</span>
@@ -721,6 +818,95 @@ export function App() {
               </aside>
             ) : null}
           </div>
+        </section>
+        </div>
+
+        <section hidden={view !== "tasks"} className="panel task-center">
+          <div className="task-summary">
+            <div>
+              <p className="eyebrow">DURABLE TASKS</p>
+              <h2>任务历史</h2>
+              <p className="muted">
+                运行中的任务在应用重启后会标记为已中断，可手动重试。
+              </p>
+            </div>
+            <span className="status-badge">
+              待处理 {dashboard?.pendingTasks ?? 0}
+            </span>
+          </div>
+          {tasks.length ? (
+            <div className="task-list">
+              {tasks.map((task) => {
+                const isActive =
+                  task.status === "queued" || task.status === "running";
+                return (
+                  <article className="task-card" key={task.id}>
+                    <div className="task-head">
+                      <div>
+                        <strong>
+                          {task.type === "backup" ? "数据库备份" : task.type}
+                        </strong>
+                        <p className="muted">
+                          {task.id} · {new Date(task.createdAt).toLocaleString()}
+                        </p>
+                      </div>
+                      <span
+                        className={`task-status status-${task.status}`}
+                      >
+                        {taskStatusLabels[task.status]}
+                      </span>
+                    </div>
+                    <div className="progress-line">
+                      <span style={{ width: `${task.progress}%` }} />
+                    </div>
+                    <div className="task-meta">
+                      <span>进度 {task.progress}%</span>
+                      <span>尝试 {task.attempts + 1} 次</span>
+                      {task.finishedAt ? (
+                        <span>
+                          完成于 {new Date(task.finishedAt).toLocaleTimeString()}
+                        </span>
+                      ) : null}
+                    </div>
+                    {task.error ? (
+                      <p className="task-error">{task.error}</p>
+                    ) : null}
+                    {typeof task.result.path === "string" ? (
+                      <p className="task-result">
+                        备份文件：<code>{task.result.path}</code>
+                      </p>
+                    ) : null}
+                    <div className="button-row">
+                      {isActive ? (
+                        <button
+                          className="danger"
+                          onClick={() => void cancelTask(task.id)}
+                          disabled={busy}
+                        >
+                          取消任务
+                        </button>
+                      ) : null}
+                      {["failed", "cancelled", "interrupted"].includes(
+                        task.status,
+                      ) ? (
+                        <button
+                          onClick={() => void retryTask(task.id)}
+                          disabled={busy}
+                        >
+                          重试
+                        </button>
+                      ) : null}
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="empty">
+              <strong>暂无任务</strong>
+              <p>创建一个后台备份任务，或等待后续采集与 AI 任务接入。</p>
+            </div>
+          )}
         </section>
 
         <footer>

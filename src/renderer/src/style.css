@@ -546,6 +546,123 @@ footer {
   font-size: 12px;
 }
 
+.task-center {
+  min-height: 520px;
+}
+
+.task-summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 18px;
+  padding-bottom: 15px;
+  border-bottom: 1px solid #e1eaea;
+}
+
+.task-summary h2 {
+  margin: 0;
+}
+
+.status-badge {
+  padding: 5px 9px;
+  border-radius: 999px;
+  color: #0b7779;
+  background: #e0f3ef;
+  font-size: 12px;
+}
+
+.task-list {
+  display: grid;
+  gap: 11px;
+  margin-top: 14px;
+}
+
+.task-card {
+  padding: 15px;
+  border: 1px solid #dce7e7;
+  border-radius: 13px;
+  background: #fff;
+}
+
+.task-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.task-head p {
+  margin: 4px 0 0;
+  font-size: 11px;
+}
+
+.task-status {
+  padding: 3px 8px;
+  border-radius: 999px;
+  color: #60747b;
+  background: #eef3f3;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.task-status.status-running,
+.task-status.status-queued {
+  color: #0b6872;
+  background: #dff2f1;
+}
+
+.task-status.status-succeeded {
+  color: #176946;
+  background: #dff3e9;
+}
+
+.task-status.status-failed,
+.task-status.status-interrupted {
+  color: #973737;
+  background: #fdecec;
+}
+
+.progress-line {
+  height: 6px;
+  margin-top: 13px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e8efee;
+}
+
+.progress-line span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #0b7779;
+  transition: width 180ms ease;
+}
+
+.task-meta {
+  display: flex;
+  gap: 15px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  color: #718187;
+  font-size: 11px;
+}
+
+.task-error {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: #943d3d;
+  background: #fdf0f0;
+  font-size: 12px;
+}
+
+.task-result {
+  margin: 10px 0 0;
+  overflow-wrap: anywhere;
+  color: #52666c;
+  font-size: 12px;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;

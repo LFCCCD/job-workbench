@@ -13,6 +13,7 @@ Windows 本地求职管理工具。当前实现为 M1 垂直切片，已打通�
 - SQLite 一致性备份
 - 数据库恢复及恢复前自动安全备份
 - 持久化 Task 表和重启中断检测
+- 任务中心：后台备份、进度、取消、重试和清理已完成记录
 - 已验证简历事实导出 PDF
 - Windows NSIS 安装包
 
@@ -34,6 +35,12 @@ E1D1F3DC3CF45557FF0C04B2AD7FD6D6BA0C0EC081F61E8F768A9D7B151A4D62
 
 ```powershell
 npm install
+npm start
+```
+
+开发模式：
+
+```powershell
 npm run dev
 ```
 
@@ -60,7 +67,7 @@ npm run dist
 ## 测试
 
 - `npm run check`：TypeScript 类型检查
-- `npm test`：SQLite、Schema、Task、状态、归档、备份、恢复和迁移测试
+- `npm test`：SQLite、Schema、Task 恢复、状态、归档、备份、恢复和迁移测试
 - `node scripts/electron-smoke.cjs`：真实 Electron 流程测试
 
 ## 技术决策

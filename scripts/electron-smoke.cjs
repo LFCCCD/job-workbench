@@ -86,6 +86,17 @@ async function main() {
     page.once("dialog", (dialog) => dialog.accept());
     await page.getByRole("button", { name: "永久删除" }).click();
     await page.waitForSelector("text=还没有岗位");
+    await page.getByRole("button", { name: "后台备份" }).click();
+    await page.waitForSelector(".task-card");
+    await page.waitForFunction(() =>
+      document.querySelector(".task-status")?.textContent?.includes("已完成"),
+    );
+    await page.screenshot({
+      path: path.join(__dirname, "..", "artifacts", "smoke-tasks.png"),
+      fullPage: false,
+    });
+    await page.getByRole("button", { name: "清理已完成记录" }).click();
+    await page.waitForSelector("text=暂无任务");
 
     const dashboard = await page.evaluate(async () => {
       return window.jobWorkbench.getDashboard();

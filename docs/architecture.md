@@ -23,6 +23,8 @@ The first milestone proves the complete local desktop path:
   a safety backup.
 - `schema_migrations` records schema versions. The current schema version is 2.
 - Durable tasks are stored in SQLite with idempotency keys and interrupted-on-restart handling.
+- The task center executes registered task types in the main process, exposes progress and
+  errors through IPC, and supports cancel, retry, and finished-record cleanup.
 - Job filters are validated with shared Zod contracts and saved views are stored in SQLite.
 - Permanent deletion is restricted to jobs already in the recycle bin.
 
@@ -36,7 +38,7 @@ to avoid native ABI rebuilds and installer packaging risk.
 
 - BOSS Collector utility process
 - AI Provider and AI utility process
-- Durable task queue and recovery UI
+- Background collectors and AI handlers for the existing durable task queue
 - Full CRM and interview records
 - Full multi-version resume editor
 - Auto update and code signing

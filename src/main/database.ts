@@ -326,6 +326,19 @@ export class JobDatabase {
     return row ? this.rowToTask(row) : null;
   }
 
+  listTasks(status?: TaskStatus | null): TaskRecord[] {
+    const rows = status
+      ? (this.db
+          .prepare(
+            "SELECT * FROM tasks WHERE status = ? ORDER BY created_at DESC",
+          )
+          .all(status) as SqlRow[])
+      : (this.db
+          .prepare("SELECT * FROM tasks ORDER BY created_at DESC LIMIT 100")
+          .all() as SqlRow[]);
+    return rows.map((row) => this.rowToTask(row));
+  }
+
   updateTask(
     id: string,
     patch: {
@@ -370,6 +383,16 @@ export class JobDatabase {
         id,
       );
     return this.getTask(id)!;
+  }
+
+  clearFinishedTasks(): number {
+    const result = this.db
+      .prepare(
+        `DELETE FROM tasks
+         WHERE status IN ('succeeded', 'failed', 'cancelled', 'interrupted')`,
+      )
+      .run();
+    return Number(result.changes);
   }
 
   private rowToTask(row: SqlRow): TaskRecord {

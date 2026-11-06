@@ -8,6 +8,7 @@ import {
   shell,
 } from "electron";
 import { JobDatabase } from "./database";
+import { TaskService } from "./task-service";
 import {
   ArchiveJobsSchema,
   JobStatusSchema,
@@ -29,6 +30,7 @@ app.setPath("userData", userDataRoot);
 
 let mainWindow: BrowserWindow | null = null;
 let database: JobDatabase | null = null;
+let taskService: TaskService | null = null;
 let pendingMigration: MigrationPreview | null = null;
 
 function getDatabase(): JobDatabase {
@@ -36,6 +38,11 @@ function getDatabase(): JobDatabase {
     database = new JobDatabase(app.getPath("userData"));
   }
   return database;
+}
+
+function getTaskService(): TaskService {
+  taskService ||= new TaskService(getDatabase());
+  return taskService;
 }
 
 function escapeHtml(value: unknown): string {
@@ -132,6 +139,21 @@ function registerIpc() {
   });
   ipcMain.handle("workbench:create-backup", async () => {
     return getDatabase().createBackup("manual");
+  });
+  ipcMain.handle("workbench:list-tasks", () => {
+    return getTaskService().listTasks();
+  });
+  ipcMain.handle("workbench:create-backup-task", () => {
+    return getTaskService().enqueue("backup");
+  });
+  ipcMain.handle("workbench:cancel-task", (_event, id) => {
+    return getTaskService().cancel(String(id));
+  });
+  ipcMain.handle("workbench:retry-task", (_event, id) => {
+    return getTaskService().retry(String(id));
+  });
+  ipcMain.handle("workbench:clear-finished-tasks", () => {
+    return getTaskService().clearFinished();
   });
   ipcMain.handle("workbench:inspect-legacy-database", async () => {
     if (!mainWindow) return null;
@@ -239,6 +261,7 @@ function registerIpc() {
 
 app.whenReady().then(() => {
   registerIpc();
+  getTaskService().resumeQueuedTasks();
   createWindow();
 
   app.on("activate", () => {
@@ -251,6 +274,8 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  taskService?.shutdown();
+  taskService = null;
   database?.close();
   database = null;
 });

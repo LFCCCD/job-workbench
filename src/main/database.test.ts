@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { JobDatabase } from "./database";
+import { TaskService } from "./task-service";
 
 const roots: string[] = [];
 
@@ -17,6 +18,20 @@ afterEach(() => {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+async function waitFor<T>(
+  read: () => T,
+  predicate: (value: T) => boolean,
+  timeoutMs = 2_000,
+) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const value = read();
+    if (predicate(value)) return value;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("Timed out waiting for condition");
+}
 
 describe("JobDatabase", () => {
   it("adds jobs, updates status, archives, restores and backs up", async () => {
@@ -175,6 +190,44 @@ describe("JobDatabase", () => {
       expect(database.listJobs()).toHaveLength(1);
       expect(database.listJobs()[0].id).toBe(original.id);
     } finally {
+      database.close();
+    }
+  });
+
+  it("persists tasks, resumes queued work and clears finished records", async () => {
+    const root = createRoot();
+    const database = new JobDatabase(root);
+    const service = new TaskService(database);
+    try {
+      const queued = database.createTask("backup", {}, "backup-resume-test");
+      service.resumeQueuedTasks();
+      const completed = await waitFor(
+        () => database.getTask(queued.id),
+        (task) => task?.status === "succeeded",
+      );
+      expect(completed?.progress).toBe(100);
+      expect(typeof completed?.result.path).toBe("string");
+
+      const cancelled = database.createTask("future-worker", {});
+      expect(service.cancel(cancelled.id).status).toBe("cancelled");
+
+      const interrupted = database.createTask("future-worker", {});
+      database.updateTask(interrupted.id, {
+        status: "interrupted",
+        error: "应用重启",
+      });
+      expect(database.listTasks("interrupted")).toHaveLength(1);
+
+      const retried = service.retry(interrupted.id);
+      const retryResult = await waitFor(
+        () => database.getTask(retried.id),
+        (task) => task?.status === "failed",
+      );
+      expect(retryResult?.attempts).toBe(1);
+      expect(service.clearFinished().ok).toBe(true);
+      expect(database.listTasks()).toHaveLength(0);
+    } finally {
+      service.shutdown();
       database.close();
     }
   });
