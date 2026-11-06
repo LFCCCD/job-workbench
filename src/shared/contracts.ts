@@ -413,6 +413,10 @@ export const SetFollowUpStatusSchema = z.object({
   status: z.enum(followUpStatuses),
 });
 
+export const NotificationSettingSchema = z.object({
+  enabled: z.boolean(),
+});
+
 export type JobStatus = z.infer<typeof JobStatusSchema>;
 export type ManualJobInput = z.infer<typeof ManualJobSchema>;
 export type MigrationResult = z.infer<typeof MigrationResultSchema>;
@@ -726,6 +730,54 @@ export interface CrmOverview {
   agenda: CrmAgendaItem[];
 }
 
+export interface DueFollowUpReminder {
+  id: string;
+  jobId: string;
+  jobTitle: string;
+  company: string;
+  title: string;
+  dueAt: string;
+}
+
+export type HealthCheckStatus = "ok" | "warning" | "error";
+
+export interface HealthCheckItem {
+  id: string;
+  label: string;
+  status: HealthCheckStatus;
+  detail: string;
+}
+
+export interface SystemHealth {
+  overall: HealthCheckStatus;
+  appVersion: string;
+  uptimeSeconds: number;
+  schemaVersion: number;
+  databasePath: string;
+  dataDirectory: string;
+  backupDirectory: string;
+  logsDirectory: string;
+  databaseIntegrity: string;
+  recentBackups: string[];
+  edgeRunning: boolean;
+  edgeEndpoint: string;
+  aiProvider: AiProviderKind;
+  aiConfigured: boolean;
+  pendingTasks: number;
+  pendingCandidates: number;
+  dueFollowUps: number;
+  notificationSupported: boolean;
+  notificationsEnabled: boolean;
+  trayActive: boolean;
+  checks: HealthCheckItem[];
+}
+
+export interface ReminderCheckResult {
+  due: number;
+  delivered: number;
+  suppressed: boolean;
+}
+
 export type TaskStatus =
   | "queued"
   | "running"
@@ -821,6 +873,11 @@ export interface JobWorkbenchApi {
     fields: InterviewFields,
   ): Promise<InterviewRecord>;
   deleteInterview(id: string): Promise<OperationResult>;
+  getSystemHealth(): Promise<SystemHealth>;
+  setNotificationsEnabled(enabled: boolean): Promise<OperationResult>;
+  runReminderCheck(): Promise<ReminderCheckResult>;
+  openDataDirectory(): Promise<OperationResult>;
+  exportDiagnostics(): Promise<string | null>;
   cancelTask(id: string): Promise<TaskRecord>;
   retryTask(id: string): Promise<TaskRecord>;
   clearFinishedTasks(): Promise<OperationResult>;

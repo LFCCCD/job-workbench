@@ -113,6 +113,7 @@ async function main() {
     env: {
       ...process.env,
       JOB_WORKBENCH_USER_DATA: userData,
+      JOB_WORKBENCH_DISABLE_NOTIFICATIONS: "1",
     },
   });
   app.process().stderr?.on("data", (chunk) => {
@@ -258,6 +259,89 @@ async function main() {
     }
     await page.screenshot({
       path: path.join(__dirname, "..", "artifacts", "smoke-crm.png"),
+      fullPage: true,
+    });
+    const reminderCheck = await page.evaluate(async () => {
+      const jobs = await window.jobWorkbench.listJobs({
+        query: "软件实施工程师",
+      });
+      if (!jobs[0]) throw new Error("Reminder smoke job not found");
+      await window.jobWorkbench.saveFollowUp(jobs[0].id, null, {
+        title: "测试到期提醒去重",
+        dueAt: new Date(Date.now() - 60_000).toISOString(),
+        status: "pending",
+        notes: "smoke reminder",
+      });
+      const first = await window.jobWorkbench.runReminderCheck();
+      const second = await window.jobWorkbench.runReminderCheck();
+      return { first, second };
+    });
+    if (
+      reminderCheck.first.delivered !== 1 ||
+      !reminderCheck.first.suppressed ||
+      reminderCheck.second.delivered !== 0
+    ) {
+      throw new Error(
+        `Reminder delivery check failed: ${JSON.stringify(reminderCheck)}`,
+      );
+    }
+    await page.locator("nav").getByRole("button", { name: "系统" }).click();
+    await page.waitForSelector("text=HEALTH SUMMARY");
+    const healthCheck = await page.evaluate(() =>
+      window.jobWorkbench.getSystemHealth(),
+    );
+    if (
+      healthCheck.overall === "error" ||
+      !healthCheck.trayActive ||
+      healthCheck.schemaVersion !== 7 ||
+      healthCheck.databaseIntegrity !== "ok"
+    ) {
+      throw new Error(`Health check failed: ${JSON.stringify(healthCheck)}`);
+    }
+    const diagnosticsPath = path.join(userData, "diagnostics-smoke.json");
+    await app.evaluate(({ dialog }, filePath) => {
+      dialog.showSaveDialog = async () => ({
+        canceled: false,
+        filePath,
+      });
+    }, diagnosticsPath);
+    await page
+      .locator(".top-actions")
+      .getByRole("button", { name: "导出诊断报告" })
+      .click();
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      if (fs.existsSync(diagnosticsPath)) break;
+      await page.waitForTimeout(100);
+    }
+    if (!fs.existsSync(diagnosticsPath)) {
+      throw new Error("Diagnostics report was not created");
+    }
+    const diagnostics = fs.readFileSync(diagnosticsPath, "utf8");
+    if (
+      !diagnostics.includes("<DATA_DIR>") ||
+      diagnostics.includes("招聘老师") ||
+      diagnostics.includes("电力设备采购平台") ||
+      diagnostics.includes("smoke-remote-key")
+    ) {
+      throw new Error("Diagnostics report was not safely redacted");
+    }
+    await app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0]?.close();
+    });
+    await page.waitForTimeout(200);
+    const hiddenToTray = await app.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0];
+      return Boolean(window && !window.isVisible());
+    });
+    if (!hiddenToTray) throw new Error("Window did not hide to tray");
+    await app.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0];
+      window?.show();
+      window?.focus();
+    });
+    await page.waitForTimeout(200);
+    await page.screenshot({
+      path: path.join(__dirname, "..", "artifacts", "smoke-health.png"),
       fullPage: true,
     });
     await page.locator("nav").getByRole("button", { name: "AI 分析" }).click();

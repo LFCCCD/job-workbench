@@ -35,6 +35,7 @@ import type {
   CrmOverview,
   CrmWorkspace,
   DashboardData,
+  DueFollowUpReminder,
   FollowUpFields,
   FollowUpRecord,
   FollowUpStatus,
@@ -90,7 +91,7 @@ const JOB_COLUMNS = `
   last_seen_at, updated_at
 `;
 
-const CURRENT_SCHEMA_VERSION = 6;
+const CURRENT_SCHEMA_VERSION = 7;
 const REQUIRED_TABLES = [
   "jobs",
   "job_events",
@@ -335,6 +336,13 @@ export class JobDatabase {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS notification_deliveries (
+        delivery_key TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        sent_at TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
       CREATE INDEX IF NOT EXISTS idx_jobs_archived ON jobs(archived_at);
       CREATE INDEX IF NOT EXISTS idx_job_events_job ON job_events(job_id, created_at DESC);
@@ -351,6 +359,8 @@ export class JobDatabase {
         ON follow_ups(status, due_at);
       CREATE INDEX IF NOT EXISTS idx_interviews_job
         ON interviews(job_id, scheduled_at);
+      CREATE INDEX IF NOT EXISTS idx_notification_deliveries_sent
+        ON notification_deliveries(sent_at DESC);
     `);
 
     this.ensureArchivedColumn();
@@ -476,6 +486,17 @@ export class JobDatabase {
         throw new Error("M2 CRM migration prerequisites are missing");
       }
       record.run(6, "job-contacts-follow-ups-and-interviews", timestamp);
+    }
+    if (this.getSchemaVersion() < 7) {
+      const table = this.db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'notification_deliveries'",
+        )
+        .get();
+      if (!table) {
+        throw new Error("M2 notification migration prerequisite is missing");
+      }
+      record.run(7, "notification-delivery-deduplication", timestamp);
     }
     if (this.getSchemaVersion() > CURRENT_SCHEMA_VERSION) {
       throw new Error("数据库版本高于当前应用版本");
@@ -1303,6 +1324,71 @@ export class JobDatabase {
       )
       .slice(0, 30);
     return { metrics, agenda };
+  }
+
+  listDueFollowUpReminders(nowIso = new Date().toISOString()): DueFollowUpReminder[] {
+    return (
+      this.db
+        .prepare(`
+          SELECT follow.id, follow.job_id, follow.title, follow.due_at,
+                 job.title AS job_title, job.company
+          FROM follow_ups AS follow
+          JOIN jobs AS job ON job.id = follow.job_id
+          WHERE follow.status = 'pending'
+            AND follow.due_at <= ?
+            AND job.archived_at IS NULL
+          ORDER BY follow.due_at
+          LIMIT 50
+        `)
+        .all(nowIso) as SqlRow[]
+    ).map(
+      (row): DueFollowUpReminder => ({
+        id: String(row.id),
+        jobId: String(row.job_id),
+        jobTitle: String(row.job_title),
+        company: String(row.company),
+        title: String(row.title),
+        dueAt: String(row.due_at),
+      }),
+    );
+  }
+
+  hasNotificationDelivery(deliveryKey: string): boolean {
+    return Boolean(
+      this.db
+        .prepare(
+          "SELECT delivery_key FROM notification_deliveries WHERE delivery_key = ?",
+        )
+        .get(deliveryKey),
+    );
+  }
+
+  markNotificationDelivery(
+    deliveryKey: string,
+    kind: string,
+    entityId: string,
+  ): void {
+    this.db
+      .prepare(`
+        INSERT OR IGNORE INTO notification_deliveries (
+          delivery_key, kind, entity_id, sent_at
+        ) VALUES (?, ?, ?, ?)
+      `)
+      .run(deliveryKey, kind, entityId, new Date().toISOString());
+  }
+
+  countNotificationDeliveriesToday(): number {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    return Number(
+      (
+        this.db
+          .prepare(
+            "SELECT COUNT(*) AS count FROM notification_deliveries WHERE sent_at >= ?",
+          )
+          .get(start.toISOString()) as SqlRow
+      ).count || 0,
+    );
   }
 
   saveJobContact(
@@ -2462,6 +2548,12 @@ export class JobDatabase {
             "created_at",
             "updated_at",
           ],
+          notification_deliveries: [
+            "delivery_key",
+            "kind",
+            "entity_id",
+            "sent_at",
+          ],
         })) {
           if (!sourceTables.has(table)) continue;
           const rows = source
@@ -2530,6 +2622,7 @@ export class JobDatabase {
         this.db.exec("DELETE FROM job_contacts");
         this.db.exec("DELETE FROM follow_ups");
         this.db.exec("DELETE FROM interviews");
+        this.db.exec("DELETE FROM notification_deliveries");
         this.db.exec("DELETE FROM job_events");
         this.db.exec("DELETE FROM jobs");
         this.db.exec("DELETE FROM resume_facts");
@@ -2554,6 +2647,7 @@ export class JobDatabase {
           "job_contacts",
           "follow_ups",
           "interviews",
+          "notification_deliveries",
         ]) {
           if (!sourceTables.has(table)) continue;
           const target = targetColumns(table);

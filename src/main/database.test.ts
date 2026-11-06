@@ -53,7 +53,7 @@ describe("JobDatabase", () => {
         total: 1,
         active: 1,
         archived: 0,
-        schemaVersion: 6,
+        schemaVersion: 7,
         pendingTasks: 0,
       });
 
@@ -475,6 +475,18 @@ describe("JobDatabase", () => {
         upcomingSevenDays: 1,
         openFollowUps: 2,
       });
+      expect(database.listDueFollowUpReminders().map((item) => item.id)).toEqual([
+        overdue.id,
+      ]);
+      const deliveryKey = `follow-up:${overdue.id}:test-day`;
+      expect(database.hasNotificationDelivery(deliveryKey)).toBe(false);
+      database.markNotificationDelivery(
+        deliveryKey,
+        "follow-up",
+        overdue.id,
+      );
+      expect(database.hasNotificationDelivery(deliveryKey)).toBe(true);
+      expect(database.countNotificationDeliveriesToday()).toBe(1);
       expect(database.getCrmWorkspace(job.id).followUps).toHaveLength(2);
 
       expect(database.setFollowUpStatus(overdue.id, "completed")).toMatchObject({
@@ -558,7 +570,7 @@ describe("JobDatabase", () => {
           preview.counts.jobs,
         );
         expect(fs.existsSync(result.backupPath)).toBe(true);
-        expect(database.getSchemaVersion()).toBe(6);
+        expect(database.getSchemaVersion()).toBe(7);
       } finally {
         database.close();
       }

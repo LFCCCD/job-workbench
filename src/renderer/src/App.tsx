@@ -31,6 +31,7 @@ import type {
   ResumeVersionRecord,
   ResumeWorkspace,
   SavedView,
+  SystemHealth,
   TaskRecord,
 } from "../../shared/contracts";
 import { jobStatuses } from "../../shared/contracts";
@@ -110,6 +111,11 @@ const viewCopy = {
     eyebrow: "JOB SEARCH CRM",
     title: "跟进",
     description: "联系人、待办提醒、面试安排与沟通时间线",
+  },
+  system: {
+    eyebrow: "SYSTEM HEALTH",
+    title: "系统",
+    description: "托盘、通知、健康检查、备份与脱敏诊断",
   },
   tasks: {
     eyebrow: "TASK CENTER",
@@ -290,7 +296,7 @@ function eventLabel(eventType: string): string {
 
 export function App() {
   const [view, setView] = useState<
-    "jobs" | "collector" | "ai" | "resume" | "followup" | "tasks"
+    "jobs" | "collector" | "ai" | "resume" | "followup" | "system" | "tasks"
   >("jobs");
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [jobs, setJobs] = useState<JobRecord[]>([]);
@@ -355,6 +361,7 @@ export function App() {
     id: string | null;
     fields: InterviewFields;
   } | null>(null);
+  const [systemHealth, setSystemHealth] = useState<SystemHealth | null>(null);
   const [collectorRequest, setCollectorRequest] =
     useState<CollectorRequest>(defaultCollectorRequest);
   const [collectorQueriesText, setCollectorQueriesText] = useState(
@@ -1165,6 +1172,53 @@ export function App() {
     });
   }
 
+  async function refreshSystemHealth() {
+    setSystemHealth(await window.jobWorkbench.getSystemHealth());
+  }
+
+  async function openSystemPage() {
+    await refreshSystemHealth();
+    setView("system");
+  }
+
+  async function setNotificationsEnabled(enabled: boolean) {
+    await runOperation(async () => {
+      const result = await window.jobWorkbench.setNotificationsEnabled(enabled);
+      await refreshSystemHealth();
+      showMessage(result.message);
+    });
+  }
+
+  async function runReminderCheck() {
+    await runOperation(async () => {
+      const result = await window.jobWorkbench.runReminderCheck();
+      await refreshSystemHealth();
+      showMessage(
+        result.suppressed
+          ? `已检查 ${result.due} 个到期跟进；测试模式已抑制弹窗`
+          : result.delivered
+            ? `已发送 ${result.delivered} 条到期提醒`
+            : result.due
+              ? "到期提醒今天已经发送过"
+              : "当前没有到期跟进",
+      );
+    });
+  }
+
+  async function openDataDirectory() {
+    await runOperation(async () => {
+      const result = await window.jobWorkbench.openDataDirectory();
+      showMessage(result.message);
+    });
+  }
+
+  async function exportDiagnostics() {
+    await runOperation(async () => {
+      const destination = await window.jobWorkbench.exportDiagnostics();
+      if (destination) showMessage(`诊断报告已保存：${destination}`);
+    });
+  }
+
   async function cancelTask(id: string) {
     await runOperation(async () => {
       await window.jobWorkbench.cancelTask(id);
@@ -1286,6 +1340,12 @@ export function App() {
             onClick={() => setView("tasks")}
           >
             任务中心
+          </button>
+          <button
+            className={view === "system" ? "active" : ""}
+            onClick={() => void openSystemPage()}
+          >
+            系统
           </button>
         </nav>
         <div className="sidebar-status">
@@ -1438,6 +1498,34 @@ export function App() {
                   disabled={busy || !selectedCrmJobId}
                 >
                   新增面试
+                </button>
+              </>
+            ) : view === "system" ? (
+              <>
+                <button
+                  onClick={() => void refreshSystemHealth()}
+                  disabled={busy}
+                >
+                  重新检查
+                </button>
+                <button
+                  onClick={() => void runReminderCheck()}
+                  disabled={busy}
+                >
+                  立即检查提醒
+                </button>
+                <button
+                  onClick={() => void openDataDirectory()}
+                  disabled={busy}
+                >
+                  打开数据目录
+                </button>
+                <button
+                  className="primary"
+                  onClick={() => void exportDiagnostics()}
+                  disabled={busy}
+                >
+                  导出诊断报告
                 </button>
               </>
             ) : (
@@ -3370,6 +3458,171 @@ export function App() {
                   <p>查看联系人、跟进、面试和完整操作时间线。</p>
                 </div>
               )}
+            </section>
+          </div>
+        </section>
+
+        <section hidden={view !== "system"} className="system-center">
+          <section
+            className={`health-hero health-${systemHealth?.overall || "warning"}`}
+          >
+            <div>
+              <p className="eyebrow">HEALTH SUMMARY</p>
+              <h2>
+                {systemHealth?.overall === "ok"
+                  ? "系统运行正常"
+                  : systemHealth?.overall === "error"
+                    ? "发现需要处理的问题"
+                    : "系统可用，有可优化项"}
+              </h2>
+              <p>
+                数据库、后台任务和本地数据可继续使用；提醒与采集连接状态如下。
+              </p>
+            </div>
+            <div className="health-version">
+              <span>应用版本</span>
+              <strong>v{systemHealth?.appVersion || "-"}</strong>
+              <small>
+                运行 {Math.floor((systemHealth?.uptimeSeconds || 0) / 60)} 分钟
+              </small>
+            </div>
+          </section>
+
+          <section className="health-check-grid">
+            {(systemHealth?.checks || []).map((check) => (
+              <article
+                className={`health-check check-${check.status}`}
+                key={check.id}
+              >
+                <div>
+                  <span className="health-dot" />
+                  <strong>{check.label}</strong>
+                </div>
+                <p>{check.detail}</p>
+              </article>
+            ))}
+          </section>
+
+          <div className="system-columns">
+            <section className="panel system-settings">
+              <div className="system-section-head">
+                <div>
+                  <p className="eyebrow">NOTIFICATIONS & TRAY</p>
+                  <h2>提醒与托盘</h2>
+                  <p className="muted">
+                    关闭窗口后应用保留在托盘，到期跟进每天最多提醒一次。
+                  </p>
+                </div>
+                <span
+                  className={`status-badge ${
+                    systemHealth?.trayActive ? "" : "muted-badge"
+                  }`}
+                >
+                  托盘{systemHealth?.trayActive ? "已启用" : "未启用"}
+                </span>
+              </div>
+              <label className="system-toggle">
+                <input
+                  type="checkbox"
+                  checked={Boolean(systemHealth?.notificationsEnabled)}
+                  disabled={!systemHealth?.notificationSupported || busy}
+                  onChange={(event) =>
+                    void setNotificationsEnabled(event.target.checked)
+                  }
+                />
+                <span>
+                  <strong>Windows 到期提醒</strong>
+                  <small>
+                    {systemHealth?.notificationSupported
+                      ? "支持系统通知"
+                      : "当前系统不支持通知"}
+                  </small>
+                </span>
+              </label>
+              <div className="system-actions">
+                <button
+                  onClick={() => void runReminderCheck()}
+                  disabled={busy}
+                >
+                  立即检查到期跟进
+                </button>
+                <button
+                  onClick={() => void openDataDirectory()}
+                  disabled={busy}
+                >
+                  打开数据目录
+                </button>
+                <button
+                  className="primary"
+                  onClick={() => void exportDiagnostics()}
+                  disabled={busy}
+                >
+                  导出脱敏诊断报告
+                </button>
+              </div>
+              <p className="system-privacy">
+                诊断报告不包含 API Key、Cookie、联系人、简历正文、招聘聊天或完整 JD。
+              </p>
+            </section>
+
+            <section className="panel system-status-panel">
+              <p className="eyebrow">LOCAL STATUS</p>
+              <h2>本地状态</h2>
+              <dl className="system-facts">
+                <dt>Schema</dt>
+                <dd>v{systemHealth?.schemaVersion ?? "-"}</dd>
+                <dt>数据库完整性</dt>
+                <dd>{systemHealth?.databaseIntegrity || "-"}</dd>
+                <dt>待处理任务</dt>
+                <dd>{systemHealth?.pendingTasks ?? 0}</dd>
+                <dt>候选预览</dt>
+                <dd>{systemHealth?.pendingCandidates ?? 0}</dd>
+                <dt>未完成跟进</dt>
+                <dd>{systemHealth?.dueFollowUps ?? 0}</dd>
+                <dt>专用 Edge</dt>
+                <dd>{systemHealth?.edgeRunning ? "已连接" : "未连接"}</dd>
+                <dt>AI Provider</dt>
+                <dd>
+                  {systemHealth?.aiProvider || "-"} ·{" "}
+                  {systemHealth?.aiConfigured ? "可用" : "待配置"}
+                </dd>
+              </dl>
+            </section>
+          </div>
+
+          <div className="system-columns">
+            <section className="panel system-backups">
+              <p className="eyebrow">BACKUPS</p>
+              <h2>最近备份</h2>
+              {systemHealth?.recentBackups.length ? (
+                <div className="backup-list">
+                  {systemHealth.recentBackups.map((backup) => (
+                    <div key={backup}>
+                      <strong>
+                        {backup.split(/[\\/]/).pop() || backup}
+                      </strong>
+                      <small>{backup}</small>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="muted">还没有可用备份。</p>
+              )}
+            </section>
+
+            <section className="panel system-paths">
+              <p className="eyebrow">DATA PATHS</p>
+              <h2>数据目录</h2>
+              <dl>
+                <dt>数据库</dt>
+                <dd>{systemHealth?.databasePath || "-"}</dd>
+                <dt>备份</dt>
+                <dd>{systemHealth?.backupDirectory || "-"}</dd>
+                <dt>日志</dt>
+                <dd>{systemHealth?.logsDirectory || "-"}</dd>
+                <dt>Edge 调试</dt>
+                <dd>{systemHealth?.edgeEndpoint || "-"}</dd>
+              </dl>
             </section>
           </div>
         </section>

@@ -5,7 +5,9 @@ import {
   BrowserWindow,
   dialog,
   ipcMain,
+  Menu,
   shell,
+  Tray,
 } from "electron";
 import { JobDatabase } from "./database";
 import { TaskService } from "./task-service";
@@ -14,6 +16,10 @@ import { AiSettingsService } from "./ai-settings";
 import { CollectorBrowserService } from "./collector-browser";
 import { CollectorService } from "./collector-service";
 import { renderResumeHtml } from "./resume-render";
+import { AppLogger } from "./app-logger";
+import { HealthService } from "./health-service";
+import { ReminderService } from "./reminder-service";
+import { createTrayImage } from "./tray-icon";
 import {
   AiAnalysisIdSchema,
   AiAnalyzeRequestSchema,
@@ -26,6 +32,7 @@ import {
   JobStatusSchema,
   ListJobsSchema,
   ManualJobSchema,
+  NotificationSettingSchema,
   PermanentDeleteSchema,
   ResumeExportRequestSchema,
   ResumeIdSchema,
@@ -49,12 +56,20 @@ const userDataRoot =
   process.env.JOB_WORKBENCH_USER_DATA ||
   path.join(process.env.LOCALAPPDATA || app.getPath("appData"), "JobHunter");
 app.setPath("userData", userDataRoot);
+const startedAt = Date.now();
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
 let database: JobDatabase | null = null;
 let taskService: TaskService | null = null;
 let collectorBrowser: CollectorBrowserService | null = null;
 let aiSettings: AiSettingsService | null = null;
+let appLogger: AppLogger | null = null;
+let healthService: HealthService | null = null;
+let reminderService: ReminderService | null = null;
+let reminderTimer: NodeJS.Timeout | null = null;
+let isQuitting = false;
 let pendingMigration: MigrationPreview | null = null;
 
 function getDatabase(): JobDatabase {
@@ -94,6 +109,96 @@ function getAiSettingsService(): AiSettingsService {
   return aiSettings;
 }
 
+function getAppLogger(): AppLogger {
+  appLogger ||= new AppLogger(app.getPath("userData"));
+  return appLogger;
+}
+
+function getHealthService(): HealthService {
+  healthService ||= new HealthService(
+    getDatabase(),
+    getCollectorBrowser(),
+    getAiSettingsService(),
+    getAppLogger(),
+    app.getVersion(),
+    startedAt,
+    () => Boolean(tray),
+  );
+  return healthService;
+}
+
+function getReminderService(): ReminderService {
+  reminderService ||= new ReminderService(
+    getDatabase(),
+    getAppLogger(),
+    showMainWindow,
+  );
+  return reminderService;
+}
+
+function showMainWindow() {
+  if (!mainWindow) {
+    createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function updateTrayMenu() {
+  if (!tray || !database) return;
+  let openFollowUps = 0;
+  try {
+    openFollowUps = database.getCrmOverview().metrics.openFollowUps;
+  } catch {
+    openFollowUps = 0;
+  }
+  tray.setToolTip(
+    `求职工作台${openFollowUps ? ` · ${openFollowUps} 个跟进待处理` : ""}`,
+  );
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      {
+        label: "显示求职工作台",
+        click: showMainWindow,
+      },
+      {
+        label: `未完成跟进：${openFollowUps}`,
+        enabled: false,
+      },
+      {
+        label: "立即检查提醒",
+        click: () => {
+          getReminderService().check();
+          updateTrayMenu();
+        },
+      },
+      {
+        label: "打开数据目录",
+        click: () => void shell.openPath(getDatabase().dataDir),
+      },
+      { type: "separator" },
+      {
+        label: "退出求职工作台",
+        click: () => {
+          isQuitting = true;
+          app.quit();
+        },
+      },
+    ]),
+  );
+}
+
+function createTray() {
+  if (tray) return;
+  tray = new Tray(createTrayImage());
+  tray.setToolTip("求职工作台");
+  tray.on("click", showMainWindow);
+  tray.on("double-click", showMainWindow);
+  updateTrayMenu();
+}
+
 function safeFileName(value: string): string {
   const cleaned = value
     .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
@@ -121,6 +226,16 @@ function createWindow() {
   });
 
   mainWindow.once("ready-to-show", () => mainWindow?.show());
+  mainWindow.on("close", (event) => {
+    if (!isQuitting && tray) {
+      event.preventDefault();
+      mainWindow?.hide();
+      getAppLogger().log("info", "window.hidden_to_tray");
+    }
+  });
+  mainWindow.on("closed", () => {
+    mainWindow = null;
+  });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
     return { action: "deny" };
@@ -348,19 +463,24 @@ function registerIpc() {
       ...(id ? { id } : {}),
       fields: input?.fields,
     });
-    return getDatabase().saveFollowUp(
+    const result = getDatabase().saveFollowUp(
       jobId,
       parsed.id || null,
       parsed.fields,
     );
+    updateTrayMenu();
+    return result;
   });
   ipcMain.handle("workbench:set-follow-up-status", (_event, input) => {
     const parsed = SetFollowUpStatusSchema.parse(input);
-    return getDatabase().setFollowUpStatus(parsed.id, parsed.status);
+    const result = getDatabase().setFollowUpStatus(parsed.id, parsed.status);
+    updateTrayMenu();
+    return result;
   });
   ipcMain.handle("workbench:delete-follow-up", (_event, input) => {
     const { id } = CrmDeleteSchema.parse(input);
     const deleted = getDatabase().deleteFollowUp(id);
+    updateTrayMenu();
     return {
       ok: true,
       message: deleted ? "跟进任务已删除" : "跟进任务不存在",
@@ -387,6 +507,57 @@ function registerIpc() {
       ok: true,
       message: deleted ? "面试记录已删除" : "面试记录不存在",
     };
+  });
+  ipcMain.handle("workbench:system-health", () => {
+    return getHealthService().getStatus();
+  });
+  ipcMain.handle("workbench:set-notifications", (_event, input) => {
+    const { enabled } = NotificationSettingSchema.parse(input);
+    getDatabase().setAppSetting(
+      "notifications.enabled",
+      enabled ? "true" : "false",
+    );
+    updateTrayMenu();
+    return {
+      ok: true,
+      message: enabled ? "系统通知已开启" : "系统通知已关闭",
+    };
+  });
+  ipcMain.handle("workbench:run-reminder-check", () => {
+    const result = getReminderService().check();
+    updateTrayMenu();
+    return result;
+  });
+  ipcMain.handle("workbench:open-data-directory", async () => {
+    const target = getDatabase().dataDir;
+    const error = await shell.openPath(target);
+    return {
+      ok: !error,
+      message: error || `已打开数据目录：${target}`,
+    };
+  });
+  ipcMain.handle("workbench:export-diagnostics", async () => {
+    if (!mainWindow) return null;
+    const status = await getHealthService().getStatus();
+    const report = getHealthService().buildDiagnosticsReport(status);
+    const stamp = new Date()
+      .toISOString()
+      .replaceAll(":", "")
+      .replaceAll("-", "")
+      .slice(0, 15);
+    const save = await dialog.showSaveDialog(mainWindow, {
+      title: "保存脱敏诊断报告",
+      defaultPath: path.join(
+        app.getPath("documents"),
+        `求职工作台-诊断-${stamp}.json`,
+      ),
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (save.canceled || !save.filePath) return null;
+    const fs = await import("node:fs/promises");
+    await fs.writeFile(save.filePath, report, "utf8");
+    getAppLogger().log("info", "diagnostics.exported");
+    return save.filePath;
   });
   ipcMain.handle("workbench:cancel-task", (_event, id) => {
     return getTaskService().cancel(String(id));
@@ -495,23 +666,44 @@ function registerIpc() {
   );
 }
 
-app.whenReady().then(() => {
-  registerIpc();
-  getTaskService().resumeQueuedTasks();
-  createWindow();
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", showMainWindow);
+  app.whenReady().then(() => {
+    getAppLogger().log("info", `app.started version=${app.getVersion()}`);
+    registerIpc();
+    getTaskService().resumeQueuedTasks();
+    createTray();
+    createWindow();
+    const initialReminder = setTimeout(() => {
+      getReminderService().check();
+      updateTrayMenu();
+    }, 4_000);
+    initialReminder.unref();
+    reminderTimer = setInterval(() => {
+      getReminderService().check();
+      updateTrayMenu();
+    }, 5 * 60 * 1_000);
+    reminderTimer.unref();
 
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    app.on("activate", showMainWindow);
   });
-});
 
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
-});
+  app.on("window-all-closed", () => {
+    if (!tray) app.quit();
+  });
 
-app.on("before-quit", () => {
-  taskService?.shutdown();
-  taskService = null;
-  database?.close();
-  database = null;
-});
+  app.on("before-quit", () => {
+    isQuitting = true;
+    if (reminderTimer) clearInterval(reminderTimer);
+    reminderTimer = null;
+    tray?.destroy();
+    tray = null;
+    getAppLogger().log("info", "app.stopped");
+    taskService?.shutdown();
+    taskService = null;
+    database?.close();
+    database = null;
+  });
+}

@@ -117,6 +117,15 @@ const api: JobWorkbenchApi = {
   ) => ipcRenderer.invoke("workbench:save-interview", { jobId, id, fields }),
   deleteInterview: (id: string) =>
     ipcRenderer.invoke("workbench:delete-interview", { id }),
+  getSystemHealth: () => ipcRenderer.invoke("workbench:system-health"),
+  setNotificationsEnabled: (enabled: boolean) =>
+    ipcRenderer.invoke("workbench:set-notifications", { enabled }),
+  runReminderCheck: () =>
+    ipcRenderer.invoke("workbench:run-reminder-check"),
+  openDataDirectory: () =>
+    ipcRenderer.invoke("workbench:open-data-directory"),
+  exportDiagnostics: () =>
+    ipcRenderer.invoke("workbench:export-diagnostics"),
   cancelTask: (id: string) =>
     ipcRenderer.invoke("workbench:cancel-task", id),
   retryTask: (id: string) => ipcRenderer.invoke("workbench:retry-task", id),

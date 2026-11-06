@@ -21,7 +21,7 @@ The first milestone proves the complete local desktop path:
 - PDF rendering uses a hidden BrowserWindow and never loads remote resources.
 - Data-layer migration is transactional, checked with `PRAGMA integrity_check`, and preceded by
   a safety backup.
-- `schema_migrations` records schema versions. The current schema version is 6.
+- `schema_migrations` records schema versions. The current schema version is 7.
 - Durable tasks are stored in SQLite with idempotency keys and interrupted-on-restart handling.
 - The task center executes registered task types in the main process, exposes progress and
   errors through IPC, and supports cancel, retry, and finished-record cleanup.
@@ -52,6 +52,13 @@ The first milestone proves the complete local desktop path:
 - The earliest pending follow-up is synchronized to `jobs.next_follow_up_at`; applying or
   reaching communication states updates the relevant job timestamps.
 - CRM contact data is local-only and is excluded from AI snapshots and prompts.
+- The app uses a single-instance lock and a Windows tray. Closing the window hides it while
+  durable tasks and reminder checks continue.
+- Due follow-ups are deduplicated per task per day in `notification_deliveries`.
+- Health checks cover SQLite integrity, recent backups, Edge, AI configuration, tasks, and
+  reminders. Diagnostics are exported as redacted JSON.
+- Daily app logs are retained for 14 days and never include contacts, resume content, cookies,
+  API keys, job descriptions, or recruitment chats.
 
 ## Database decision
 
