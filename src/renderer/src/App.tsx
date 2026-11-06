@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import type {
+  AiAnalysisRecord,
+  AiProviderKind,
+  AiSettingsView,
+  AiUsageSummary,
   CollectorPreviewData,
   CollectorRequest,
   CollectorStatus,
@@ -50,6 +54,22 @@ const defaultCollectorRequest: CollectorRequest = {
   requestDelayMs: 4_500,
 };
 
+const aiProviderDefaults: Record<
+  AiProviderKind,
+  { baseUrl: string; model: string }
+> = {
+  local: { baseUrl: "", model: "local-rules-v1" },
+  deepseek: {
+    baseUrl: "https://api.deepseek.com/v1",
+    model: "deepseek-chat",
+  },
+  dashscope: {
+    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    model: "qwen-plus",
+  },
+  custom: { baseUrl: "", model: "" },
+};
+
 const viewCopy = {
   jobs: {
     eyebrow: "JOB PIPELINE",
@@ -60,6 +80,11 @@ const viewCopy = {
     eyebrow: "COLLECTOR WORKER",
     title: "采集中心",
     description: "专用 Edge、低频采集、候选预览与人工确认导入",
+  },
+  ai: {
+    eyebrow: "AI EVIDENCE LAB",
+    title: "AI 分析",
+    description: "结构化要求、事实匹配、风险证据与面试准备",
   },
   tasks: {
     eyebrow: "TASK CENTER",
@@ -83,6 +108,19 @@ const taskStatusLabels: Record<TaskRecord["status"], string> = {
   cancelled: "已取消",
   interrupted: "已中断",
 };
+
+const aiRequirementStatusLabels = {
+  satisfied: "已满足",
+  partial: "部分满足",
+  missing: "缺失",
+  unknown: "待核实",
+} as const;
+
+const aiSeverityLabels = {
+  high: "高风险",
+  medium: "中风险",
+  low: "低风险",
+} as const;
 
 const emptyEditForm: JobRecordUpdate = {
   title: "",
@@ -125,7 +163,9 @@ function eventLabel(eventType: string): string {
 }
 
 export function App() {
-  const [view, setView] = useState<"jobs" | "collector" | "tasks">("jobs");
+  const [view, setView] = useState<
+    "jobs" | "collector" | "ai" | "tasks"
+  >("jobs");
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [filters, setFilters] = useState<JobFilters>(defaultFilters);
@@ -135,6 +175,25 @@ export function App() {
     useState<CollectorPreviewData | null>(null);
   const [collectorStatus, setCollectorStatus] =
     useState<CollectorStatus | null>(null);
+  const [aiSettings, setAiSettings] = useState<AiSettingsView | null>(null);
+  const [aiUsage, setAiUsage] = useState<AiUsageSummary | null>(null);
+  const [aiAnalyses, setAiAnalyses] = useState<AiAnalysisRecord[]>([]);
+  const [aiCurrent, setAiCurrent] = useState<AiAnalysisRecord | null>(null);
+  const [selectedAiJobId, setSelectedAiJobId] = useState<string | null>(null);
+  const [aiSelectedJob, setAiSelectedJob] = useState<JobRecord | null>(null);
+  const [aiForm, setAiForm] = useState<{
+    provider: AiProviderKind;
+    baseUrl: string;
+    model: string;
+    dailyRequestLimit: number;
+    apiKey: string;
+  }>({
+    provider: "local",
+    baseUrl: "",
+    model: "local-rules-v1",
+    dailyRequestLimit: 20,
+    apiKey: "",
+  });
   const [collectorRequest, setCollectorRequest] =
     useState<CollectorRequest>(defaultCollectorRequest);
   const [collectorQueriesText, setCollectorQueriesText] = useState(
@@ -164,6 +223,9 @@ export function App() {
       nextTasks,
       nextCollectorPreview,
       nextCollectorStatus,
+      nextAiSettings,
+      nextAiUsage,
+      nextAiAnalyses,
     ] = await Promise.all([
       window.jobWorkbench.getDashboard(),
       window.jobWorkbench.listJobs(nextFilters),
@@ -171,6 +233,9 @@ export function App() {
       window.jobWorkbench.listTasks(),
       window.jobWorkbench.listCollectorPreview(),
       window.jobWorkbench.getCollectorStatus(),
+      window.jobWorkbench.getAiSettings(),
+      window.jobWorkbench.getAiUsage(),
+      window.jobWorkbench.listAiAnalyses(),
     ]);
     setDashboard(nextDashboard);
     setJobs(nextJobs);
@@ -178,6 +243,17 @@ export function App() {
     setTasks(nextTasks);
     setCollectorPreview(nextCollectorPreview);
     setCollectorStatus(nextCollectorStatus);
+    setAiSettings(nextAiSettings);
+    setAiUsage(nextAiUsage);
+    setAiAnalyses(nextAiAnalyses);
+    setAiForm((current) => ({
+      provider: nextAiSettings.provider,
+      baseUrl: nextAiSettings.baseUrl,
+      model: nextAiSettings.model,
+      dailyRequestLimit: nextAiSettings.dailyRequestLimit,
+      apiKey:
+        current.provider === nextAiSettings.provider ? current.apiKey : "",
+    }));
     setSelectedCandidates((current) => {
       const available = new Set(
         nextCollectorPreview.candidates.map(
@@ -199,6 +275,19 @@ export function App() {
         setEditing(false);
       }
     }
+    if (selectedAiJobId) {
+      const jobStillVisible = nextJobs.some(
+        (job) => job.id === selectedAiJobId,
+      );
+      const [analysis, jobDetail] = await Promise.all([
+        window.jobWorkbench.getJobAiAnalysis(selectedAiJobId),
+        jobStillVisible
+          ? window.jobWorkbench.getJobDetail(selectedAiJobId)
+          : Promise.resolve(null),
+      ]);
+      setAiCurrent(analysis);
+      if (jobDetail) setAiSelectedJob(jobDetail.job);
+    }
   }
 
   useEffect(() => {
@@ -218,14 +307,29 @@ export function App() {
         window.jobWorkbench.listTasks(),
         window.jobWorkbench.getDashboard(),
         window.jobWorkbench.listCollectorPreview(),
-      ]).then(([nextTasks, nextDashboard, nextCollectorPreview]) => {
+        window.jobWorkbench.listAiAnalyses(),
+        window.jobWorkbench.getAiUsage(),
+      ]).then(([
+        nextTasks,
+        nextDashboard,
+        nextCollectorPreview,
+        nextAiAnalyses,
+        nextAiUsage,
+      ]) => {
         setTasks(nextTasks);
         setDashboard(nextDashboard);
         setCollectorPreview(nextCollectorPreview);
+        setAiAnalyses(nextAiAnalyses);
+        setAiUsage(nextAiUsage);
+        if (selectedAiJobId) {
+          void window.jobWorkbench
+            .getJobAiAnalysis(selectedAiJobId)
+            .then(setAiCurrent);
+        }
       });
     }, 800);
     return () => window.clearInterval(timer);
-  }, [tasks]);
+  }, [tasks, selectedAiJobId]);
 
   function showMessage(text: string) {
     setMessage(text);
@@ -475,6 +579,78 @@ export function App() {
     });
   }
 
+  async function openAiAnalysis(jobId?: string) {
+    const nextJobId = jobId || selectedAiJobId || jobs[0]?.id || null;
+    setSelectedAiJobId(nextJobId);
+    if (nextJobId) {
+      const [analysis, jobDetail] = await Promise.all([
+        window.jobWorkbench.getJobAiAnalysis(nextJobId),
+        window.jobWorkbench.getJobDetail(nextJobId),
+      ]);
+      setAiCurrent(analysis);
+      setAiSelectedJob(jobDetail.job);
+    } else {
+      setAiCurrent(null);
+      setAiSelectedJob(null);
+    }
+    setView("ai");
+  }
+
+  async function saveAiProvider() {
+    await runOperation(async () => {
+      const saved = await window.jobWorkbench.saveAiSettings({
+        provider: aiForm.provider,
+        baseUrl: aiForm.baseUrl,
+        model: aiForm.model,
+        dailyRequestLimit: aiForm.dailyRequestLimit,
+        ...(aiForm.apiKey.trim() ? { apiKey: aiForm.apiKey.trim() } : {}),
+      });
+      setAiSettings(saved);
+      setAiForm({
+        provider: saved.provider,
+        baseUrl: saved.baseUrl,
+        model: saved.model,
+        dailyRequestLimit: saved.dailyRequestLimit,
+        apiKey: "",
+      });
+      showMessage("AI Provider 设置已保存");
+    });
+  }
+
+  async function clearAiKey() {
+    const confirmed = window.confirm("清除已加密保存的 AI API Key？");
+    if (!confirmed) return;
+    await runOperation(async () => {
+      const result = await window.jobWorkbench.clearAiApiKey();
+      setAiForm((current) => ({ ...current, apiKey: "" }));
+      showMessage(result.message);
+    });
+  }
+
+  async function startAiAnalysis(force = false) {
+    if (!selectedAiJobId) {
+      showMessage("请先选择岗位");
+      return;
+    }
+    await runOperation(async () => {
+      await window.jobWorkbench.createAiAnalysisTask({
+        jobId: selectedAiJobId,
+        force,
+      });
+      setView("tasks");
+      showMessage("AI 分析任务已创建");
+    });
+  }
+
+  async function deleteAiAnalysis(id: string) {
+    const confirmed = window.confirm("删除这条 AI 分析记录？");
+    if (!confirmed) return;
+    await runOperation(async () => {
+      const result = await window.jobWorkbench.deleteAiAnalysis(id);
+      showMessage(result.message);
+    });
+  }
+
   async function cancelTask(id: string) {
     await runOperation(async () => {
       await window.jobWorkbench.cancelTask(id);
@@ -520,6 +696,17 @@ export function App() {
       (task.status === "queued" || task.status === "running"),
   );
   const lastCollectorTask = tasks.find((task) => task.type === "collector");
+  const selectedAiJob =
+    aiSelectedJob ||
+    jobs.find((job) => job.id === selectedAiJobId) ||
+    null;
+  const activeAiTask = tasks.find(
+    (task) =>
+      task.type === "ai-analysis" &&
+      (task.status === "queued" || task.status === "running"),
+  );
+  const aiResult =
+    aiCurrent?.status === "succeeded" ? aiCurrent.result : null;
   const copy = viewCopy[view];
 
   return (
@@ -529,7 +716,7 @@ export function App() {
           <div className="brand-mark">J</div>
           <div>
             <strong>求职工作台</strong>
-            <small>M2 · Collector Worker</small>
+            <small>M2 · AI Evidence Lab</small>
           </div>
         </div>
         <nav>
@@ -549,12 +736,17 @@ export function App() {
             ) : null}
           </button>
           <button
+            className={view === "ai" ? "active" : ""}
+            onClick={() => void openAiAnalysis()}
+          >
+            AI 分析
+          </button>
+          <button
             className={view === "tasks" ? "active" : ""}
             onClick={() => setView("tasks")}
           >
             任务中心
           </button>
-          <button disabled>AI 分析</button>
           <button disabled>简历</button>
           <button disabled>跟进</button>
         </nav>
@@ -617,6 +809,30 @@ export function App() {
                   disabled={busy || Boolean(activeCollectorTask)}
                 >
                   {activeCollectorTask ? "采集进行中" : "开始采集"}
+                </button>
+              </>
+            ) : view === "ai" ? (
+              <>
+                <button
+                  onClick={() => void openAiAnalysis()}
+                  disabled={busy || !jobs.length}
+                >
+                  刷新分析
+                </button>
+                <button
+                  className="primary"
+                  onClick={() => void startAiAnalysis(Boolean(aiResult))}
+                  disabled={
+                    busy ||
+                    !selectedAiJobId ||
+                    Boolean(activeAiTask)
+                  }
+                >
+                  {activeAiTask
+                    ? "分析进行中"
+                    : aiResult
+                      ? "重新分析"
+                      : "开始分析"}
                 </button>
               </>
             ) : (
@@ -980,6 +1196,13 @@ export function App() {
                     </p>
                     <div className="button-row">
                       <button onClick={() => setEditing(true)}>编辑岗位</button>
+                      <button
+                        onClick={() =>
+                          void openAiAnalysis(detail.job.id)
+                        }
+                      >
+                        AI 分析
+                      </button>
                       {detail.job.link ? (
                         <a href={detail.job.link} target="_blank" rel="noreferrer">
                           打开原岗位
@@ -1336,6 +1559,516 @@ export function App() {
           </section>
         </section>
 
+        <section hidden={view !== "ai"} className="ai-center">
+          <section className="ai-status-grid">
+            <article>
+              <span>当前 Provider</span>
+              <strong>
+                {aiSettings?.provider === "local"
+                  ? "本地预分析"
+                  : aiSettings?.provider || "-"}
+              </strong>
+            </article>
+            <article>
+              <span>今日远程调用</span>
+              <strong>
+                {aiUsage?.todayRemoteCalls ?? 0}/
+                {aiUsage?.dailyLimit ?? aiSettings?.dailyRequestLimit ?? 20}
+              </strong>
+            </article>
+            <article>
+              <span>分析记录</span>
+              <strong>{aiUsage?.totalAnalyses ?? aiAnalyses.length}</strong>
+            </article>
+            <article>
+              <span>缓存命中</span>
+              <strong>{aiUsage?.cachedHits ?? 0}</strong>
+            </article>
+          </section>
+
+          <section className="panel ai-settings-panel">
+            <div className="ai-section-head">
+              <div>
+                <p className="eyebrow">PROVIDER SETTINGS</p>
+                <h2>AI Provider</h2>
+                <p className="muted">
+                  免费本地预分析无需联网；远程 Provider 只发送当前 JD 和已核实事实。
+                </p>
+              </div>
+              <span
+                className={`secure-pill ${
+                  aiSettings?.encryptionAvailable ? "ready" : ""
+                }`}
+              >
+                {aiSettings?.encryptionAvailable
+                  ? "系统加密可用"
+                  : "系统加密不可用"}
+              </span>
+            </div>
+            <div className="ai-settings-grid">
+              <label>
+                Provider
+                <select
+                  value={aiForm.provider}
+                  onChange={(event) => {
+                    const provider = event.target
+                      .value as AiProviderKind;
+                    const defaults = aiProviderDefaults[provider];
+                    setAiForm({
+                      ...aiForm,
+                      provider,
+                      baseUrl: defaults.baseUrl,
+                      model: defaults.model,
+                      apiKey: "",
+                    });
+                  }}
+                >
+                  <option value="local">本地预分析（无需 Key）</option>
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="dashscope">阿里云百炼 / DashScope</option>
+                  <option value="custom">自定义 OpenAI 兼容接口</option>
+                </select>
+              </label>
+              <label>
+                Base URL
+                <input
+                  value={aiForm.baseUrl}
+                  disabled={aiForm.provider === "local"}
+                  placeholder="https://api.example.com/v1"
+                  onChange={(event) =>
+                    setAiForm({ ...aiForm, baseUrl: event.target.value })
+                  }
+                />
+              </label>
+              <label>
+                模型
+                <input
+                  value={aiForm.model}
+                  disabled={aiForm.provider === "local"}
+                  onChange={(event) =>
+                    setAiForm({ ...aiForm, model: event.target.value })
+                  }
+                />
+              </label>
+              <label>
+                每日远程调用上限
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={aiForm.dailyRequestLimit}
+                  onChange={(event) =>
+                    setAiForm({
+                      ...aiForm,
+                      dailyRequestLimit: Number(event.target.value),
+                    })
+                  }
+                />
+              </label>
+              <label className="ai-key-field">
+                API Key
+                <input
+                  type="password"
+                  autoComplete="off"
+                  value={aiForm.apiKey}
+                  disabled={aiForm.provider === "local"}
+                  placeholder={
+                    aiSettings?.hasApiKey
+                      ? "已加密保存，留空表示不修改"
+                      : "输入后将使用系统加密存储"
+                  }
+                  onChange={(event) =>
+                    setAiForm({ ...aiForm, apiKey: event.target.value })
+                  }
+                />
+              </label>
+              <div className="button-row ai-settings-actions">
+                <button
+                  className="primary"
+                  onClick={() => void saveAiProvider()}
+                  disabled={busy}
+                >
+                  保存设置
+                </button>
+                <button
+                  onClick={() => void clearAiKey()}
+                  disabled={busy || !aiSettings?.hasApiKey}
+                >
+                  清除 API Key
+                </button>
+              </div>
+            </div>
+            <p className="ai-privacy-note">
+              不会发送姓名、电话、邮箱、Cookie 或招聘聊天。远程分析前可选择仅使用已核实事实；
+              未核实内容不会进入 AI 输入。
+            </p>
+          </section>
+
+          <div className="ai-workspace">
+            <aside className="panel ai-job-picker">
+              <p className="eyebrow">SELECT JOB</p>
+              <h2>选择岗位</h2>
+              {jobs.length ? (
+                <div className="ai-job-list">
+                  {jobs.map((job) => (
+                    <button
+                      key={job.id}
+                      className={
+                        selectedAiJobId === job.id ? "active" : ""
+                      }
+                      onClick={() => {
+                        setSelectedAiJobId(job.id);
+                        setAiSelectedJob(job);
+                        void window.jobWorkbench
+                          .getJobAiAnalysis(job.id)
+                          .then(setAiCurrent);
+                      }}
+                    >
+                      <strong>{job.title}</strong>
+                      <span>
+                        {job.company} · {job.city || "城市未填"}
+                      </span>
+                      <small>规则分 {job.score}</small>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="muted">职位池中还没有岗位。</p>
+              )}
+            </aside>
+
+            <section className="panel ai-report">
+              {selectedAiJob ? (
+                <>
+                  <div className="ai-report-head">
+                    <div>
+                      <p className="eyebrow">JOB EVIDENCE REPORT</p>
+                      <h2>{selectedAiJob.title}</h2>
+                      <p className="muted">
+                        {selectedAiJob.company} · {selectedAiJob.city}
+                        {selectedAiJob.district
+                          ? ` · ${selectedAiJob.district}`
+                          : ""}
+                      </p>
+                    </div>
+                    {aiCurrent ? (
+                      <span
+                        className={`analysis-state state-${aiCurrent.status}`}
+                      >
+                        {aiCurrent.status === "succeeded"
+                          ? "分析完成"
+                          : aiCurrent.status === "running"
+                            ? "分析中"
+                            : aiCurrent.status === "cancelled"
+                              ? "已取消"
+                              : "失败"}
+                      </span>
+                    ) : null}
+                  </div>
+
+                  {activeAiTask ? (
+                    <div className="ai-active-task">
+                      <div>
+                        <strong>AI Worker 正在分析</strong>
+                        <span>{activeAiTask.progress}%</span>
+                      </div>
+                      <div className="progress-line">
+                        <span
+                          style={{ width: `${activeAiTask.progress}%` }}
+                        />
+                      </div>
+                      <button
+                        className="danger"
+                        onClick={() => void cancelTask(activeAiTask.id)}
+                        disabled={busy}
+                      >
+                        取消分析
+                      </button>
+                    </div>
+                  ) : null}
+
+                  {aiCurrent?.status === "failed" ? (
+                    <div className="ai-analysis-error">
+                      <strong>分析失败</strong>
+                      <p>{aiCurrent.error}</p>
+                      <button
+                        onClick={() => void startAiAnalysis(true)}
+                        disabled={busy}
+                      >
+                        重新分析
+                      </button>
+                    </div>
+                  ) : null}
+
+                  {aiResult ? (
+                    <div className="ai-result">
+                      <section className="ai-result-summary">
+                        <div>
+                          <span>岗位摘要</span>
+                          <strong>{aiResult.jobSummary.responsibilities}</strong>
+                          <p>{aiResult.jobSummary.workMode}</p>
+                          {aiResult.jobSummary.evidence.map(
+                            (evidence, index) => (
+                              <blockquote key={index}>
+                                {evidence.source === "fact"
+                                  ? `事实 #${evidence.factId}：`
+                                  : "JD："}
+                                {evidence.quote}
+                              </blockquote>
+                            ),
+                          )}
+                        </div>
+                        <div className={`confidence ${aiResult.confidence}`}>
+                          <span>置信度</span>
+                          <strong>
+                            {aiResult.confidence === "high"
+                              ? "高"
+                              : aiResult.confidence === "medium"
+                                ? "中"
+                                : "低"}
+                          </strong>
+                        </div>
+                      </section>
+                      <p className="confidence-reason">
+                        {aiResult.confidenceReason}
+                      </p>
+
+                      <h3>硬性要求与事实匹配</h3>
+                      <div className="requirement-list">
+                        {aiResult.hardRequirements.map(
+                          (requirement, index) => (
+                            <article
+                              className={`requirement status-${requirement.status}`}
+                              key={`${requirement.requirement}-${index}`}
+                            >
+                              <div>
+                                <strong>{requirement.requirement}</strong>
+                                <span>
+                                  {
+                                    aiRequirementStatusLabels[
+                                      requirement.status
+                                    ]
+                                  }
+                                </span>
+                              </div>
+                              {requirement.note ? (
+                                <p>{requirement.note}</p>
+                              ) : null}
+                              {requirement.evidence.map((evidence, idx) => (
+                                <blockquote
+                                  key={`${evidence.source}-${evidence.factId}-${idx}`}
+                                >
+                                  {evidence.source === "fact"
+                                    ? `事实 #${evidence.factId}：`
+                                    : "JD："}
+                                  {evidence.quote}
+                                </blockquote>
+                              ))}
+                            </article>
+                          ),
+                        )}
+                      </div>
+
+                      {aiResult.bonuses.length ? (
+                        <>
+                          <h3>加分项</h3>
+                          <div className="requirement-list">
+                            {aiResult.bonuses.map((bonus, index) => (
+                              <article
+                                className="requirement status-partial"
+                                key={`${bonus.text}-${index}`}
+                              >
+                                <div>
+                                  <strong>{bonus.text}</strong>
+                                  <span>加分项</span>
+                                </div>
+                                {bonus.evidence.map((evidence, idx) => (
+                                  <blockquote key={idx}>
+                                    {evidence.source === "fact"
+                                      ? `事实 #${evidence.factId}：`
+                                      : "JD："}
+                                    {evidence.quote}
+                                  </blockquote>
+                                ))}
+                              </article>
+                            ))}
+                          </div>
+                        </>
+                      ) : null}
+
+                      <h3>风险与要核实的问题</h3>
+                      {aiResult.risks.length ? (
+                        <div className="risk-list">
+                          {aiResult.risks.map((risk, index) => (
+                            <article
+                              className={`risk severity-${risk.severity}`}
+                              key={`${risk.title}-${index}`}
+                            >
+                              <div>
+                                <strong>{risk.title}</strong>
+                                <span>
+                                  {aiSeverityLabels[risk.severity]}
+                                </span>
+                              </div>
+                              {risk.evidence.map((evidence, idx) => (
+                                <blockquote key={idx}>
+                                  {evidence.quote}
+                                </blockquote>
+                              ))}
+                              {risk.question ? (
+                                <p>核实问题：{risk.question}</p>
+                              ) : null}
+                            </article>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="muted">未从当前 JD 识别到明确风险词。</p>
+                      )}
+
+                      <div className="ai-two-columns">
+                        <section>
+                          <h3>面试准备</h3>
+                          <div className="question-list">
+                            {aiResult.interviewQuestions.map(
+                              (question, index) => (
+                                <article key={`${question.question}-${index}`}>
+                                  <span>{question.category}</span>
+                                  <strong>{question.question}</strong>
+                                  <p>{question.preparation}</p>
+                                </article>
+                              ),
+                            )}
+                          </div>
+                        </section>
+                        <section>
+                          <h3>向招聘者确认</h3>
+                          <ul className="ask-list">
+                            {aiResult.questionsToAsk.map((question) => (
+                              <li key={question}>{question}</li>
+                            ))}
+                          </ul>
+                          <h3>简历建议</h3>
+                          <p className="resume-advice">
+                            推荐版本：
+                            {aiResult.resumeRecommendation.versionName ||
+                              "暂无匹配版本"}
+                          </p>
+                          {aiResult.resumeRecommendation.gaps.length ? (
+                            <ul className="gap-list">
+                              {aiResult.resumeRecommendation.gaps.map(
+                                (gap) => (
+                                  <li key={gap}>{gap}</li>
+                                ),
+                              )}
+                            </ul>
+                          ) : null}
+                        </section>
+                      </div>
+
+                      {aiResult.unknowns.length ? (
+                        <div className="unknown-box">
+                          <strong>仍无法确认</strong>
+                          <ul>
+                            {aiResult.unknowns.map((unknown) => (
+                              <li key={unknown}>{unknown}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : null}
+                      <div className="analysis-meta">
+                        <span>
+                          {aiCurrent?.provider} · {aiCurrent?.model}
+                        </span>
+                        <span>
+                          {aiCurrent?.latencyMs ?? 0}ms · Token{" "}
+                          {(aiCurrent?.promptTokens ?? 0) +
+                            (aiCurrent?.completionTokens ?? 0)}
+                        </span>
+                        <button
+                          onClick={() =>
+                            aiCurrent && void deleteAiAnalysis(aiCurrent.id)
+                          }
+                          disabled={busy}
+                        >
+                          删除本次结果
+                        </button>
+                      </div>
+                    </div>
+                  ) : !activeAiTask && aiCurrent?.status !== "failed" ? (
+                    <div className="empty ai-empty">
+                      <strong>还没有 AI 分析</strong>
+                      <p>
+                        先补充至少一条已核实事实，再生成带证据的岗位判断。
+                      </p>
+                      <button
+                        className="primary"
+                        onClick={() => void startAiAnalysis(false)}
+                        disabled={
+                          busy ||
+                          !selectedAiJob.description.trim() ||
+                          Boolean(activeAiTask)
+                        }
+                      >
+                        开始分析
+                      </button>
+                    </div>
+                  ) : null}
+                </>
+              ) : (
+                <div className="empty">
+                  <strong>选择一个岗位</strong>
+                  <p>分析会使用岗位 JD 和已核实简历事实。</p>
+                </div>
+              )}
+            </section>
+          </div>
+
+          <section className="panel ai-history">
+            <div className="ai-section-head">
+              <div>
+                <p className="eyebrow">ANALYSIS CACHE</p>
+                <h2>最近分析</h2>
+              </div>
+              <span className="status-badge">
+                缓存命中 {aiUsage?.cachedHits ?? 0}
+              </span>
+            </div>
+            {aiAnalyses.length ? (
+              <div className="ai-history-list">
+                {aiAnalyses.slice(0, 8).map((analysis) => {
+                  const job = jobs.find(
+                    (candidate) => candidate.id === analysis.jobId,
+                  );
+                  return (
+                    <button
+                      key={analysis.id}
+                      onClick={() =>
+                        void openAiAnalysis(analysis.jobId)
+                      }
+                    >
+                      <span>
+                        {job?.title || "已筛选岗位"} · {analysis.provider}
+                      </span>
+                      <strong>
+                        {analysis.status === "succeeded"
+                          ? analysis.cachedFromId
+                            ? "缓存复用"
+                            : "分析完成"
+                          : analysis.status}
+                      </strong>
+                      <small>
+                        {new Date(analysis.createdAt).toLocaleString()}
+                      </small>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="muted">还没有分析记录。</p>
+            )}
+          </section>
+        </section>
+
         <section hidden={view !== "tasks"} className="panel task-center">
           <div className="task-summary">
             <div>
@@ -1363,6 +2096,8 @@ export function App() {
                             ? "数据库备份"
                             : task.type === "collector"
                               ? "BOSS 候选采集"
+                              : task.type === "ai-analysis"
+                                ? "AI 单岗位分析"
                               : task.type}
                         </strong>
                         <p className="muted">
@@ -1401,6 +2136,14 @@ export function App() {
                         抓取 {task.result.captured} 个岗位 · 新增预览{" "}
                         {String(task.result.addedToPreview ?? 0)} · 已有岗位{" "}
                         {String(task.result.existingInJobPool ?? 0)}
+                      </p>
+                    ) : null}
+                    {task.type === "ai-analysis" &&
+                    typeof task.result.analysisId === "string" ? (
+                      <p className="task-result">
+                        {task.result.cached
+                          ? "命中分析缓存"
+                          : `AI 分析完成 · ${String(task.result.provider || "")} / ${String(task.result.model || "")}`}
                       </p>
                     ) : null}
                     <div className="button-row">

@@ -1,9 +1,98 @@
 const fs = require("node:fs");
+const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const { _electron: electron } = require("playwright");
 
 async function main() {
+  let aiAuthorization = "";
+  let aiRequestCount = 0;
+  const mockAnalysis = {
+    jobSummary: {
+      responsibilities: "负责系统实施、客户培训和项目交付。",
+      workMode: "JD 未明确工作方式",
+      evidence: [
+        {
+          source: "jd",
+          factId: null,
+          quote: "负责系统实施、客户培训和项目交付。",
+        },
+      ],
+    },
+    hardRequirements: [
+      {
+        requirement: "岗位职责需要人工核实",
+        status: "unknown",
+        evidence: [
+          {
+            source: "jd",
+            factId: null,
+            quote: "负责系统实施、客户培训和项目交付。",
+          },
+        ],
+        note: "当前没有可用于匹配的已核实事实",
+      },
+    ],
+    bonuses: [],
+    risks: [],
+    interviewQuestions: [
+      {
+        category: "技术",
+        question: "如何完成一次系统部署？",
+        preparation: "说明部署、验证和回滚步骤。",
+      },
+      {
+        category: "项目",
+        question: "介绍一个真实项目。",
+        preparation: "明确个人负责范围。",
+      },
+      {
+        category: "业务",
+        question: "如何处理客户需求变更？",
+        preparation: "说明记录、评估和确认流程。",
+      },
+      {
+        category: "行为",
+        question: "如何快速熟悉陌生系统？",
+        preparation: "说明文档、流程和关键用户。",
+      },
+    ],
+    questionsToAsk: ["前三个月的交付目标是什么？"],
+    resumeRecommendation: {
+      versionName: "",
+      gaps: ["待核实岗位基础要求"],
+    },
+    confidence: "low",
+    confidenceReason: "冒烟测试使用模拟 Provider，仅验证请求和证据链路",
+    unknowns: ["工作方式待确认"],
+  };
+  const aiServer = http.createServer((request, response) => {
+    if (request.url !== "/v1/chat/completions") {
+      response.writeHead(404);
+      response.end();
+      return;
+    }
+    aiAuthorization = String(request.headers.authorization || "");
+    aiRequestCount += 1;
+    request.resume();
+    request.on("end", () => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          choices: [
+            { message: { content: JSON.stringify(mockAnalysis) } },
+          ],
+          usage: { prompt_tokens: 30, completion_tokens: 20 },
+        }),
+      );
+    });
+  });
+  await new Promise((resolve) => aiServer.listen(0, "127.0.0.1", resolve));
+  const aiAddress = aiServer.address();
+  if (!aiAddress || typeof aiAddress === "string") {
+    throw new Error("Mock AI server did not start");
+  }
+  const aiBaseUrl = `http://127.0.0.1:${aiAddress.port}/v1`;
   const userData = fs.mkdtempSync(
     path.join(os.tmpdir(), "job-workbench-e2e-"),
   );
@@ -102,6 +191,157 @@ async function main() {
       path: path.join(__dirname, "..", "artifacts", "smoke-detail.png"),
       fullPage: false,
     });
+    await page
+      .locator(".detail-panel")
+      .getByRole("button", { name: "AI 分析" })
+      .click();
+    await page.waitForSelector("text=PROVIDER SETTINGS");
+    const credentialCheck = await page.evaluate(async () => {
+      await window.jobWorkbench.saveAiSettings({
+        provider: "custom",
+        baseUrl: "https://example.com/v1",
+        model: "smoke-model",
+        dailyRequestLimit: 5,
+        apiKey: "smoke-test-key",
+      });
+      const saved = await window.jobWorkbench.saveAiSettings({
+        provider: "custom",
+        baseUrl: "https://example.com/v1",
+        model: "smoke-model",
+        dailyRequestLimit: 5,
+        apiKey: "smoke-test-key-rotated",
+      });
+      const settings = await window.jobWorkbench.getAiSettings();
+      await window.jobWorkbench.clearAiApiKey();
+      const afterClear = await window.jobWorkbench.getAiSettings();
+      await window.jobWorkbench.saveAiSettings({
+        provider: "local",
+        baseUrl: "",
+        model: "local-rules-v1",
+        dailyRequestLimit: 20,
+      });
+      return {
+        encryptionAvailable: saved.encryptionAvailable,
+        hasApiKey: settings.hasApiKey,
+        cleared: !afterClear.hasApiKey,
+      };
+    });
+    if (
+      !credentialCheck.encryptionAvailable ||
+      !credentialCheck.hasApiKey ||
+      !credentialCheck.cleared
+    ) {
+      throw new Error(
+        `AI credential storage failed: ${JSON.stringify(credentialCheck)}`,
+      );
+    }
+    await page
+      .locator(".top-actions")
+      .getByRole("button", { name: "开始分析" })
+      .click();
+    const aiTask = page
+      .locator(".task-card")
+      .filter({ hasText: "AI 单岗位分析" });
+    await aiTask.waitFor();
+    await page.waitForFunction(() => {
+      const cards = [...document.querySelectorAll(".task-card")];
+      const card = cards.find((item) =>
+        item.textContent?.includes("AI 单岗位分析"),
+      );
+      return card?.textContent?.includes("已完成");
+    });
+    await page.locator("nav").getByRole("button", { name: "AI 分析" }).click();
+    await page.waitForSelector("text=分析完成");
+    await page.waitForSelector("text=硬性要求与事实匹配");
+    await page.screenshot({
+      path: path.join(__dirname, "..", "artifacts", "smoke-ai-analysis.png"),
+      fullPage: true,
+    });
+    const remoteTask = await page.evaluate(async (baseUrl) => {
+      const jobs = await window.jobWorkbench.listJobs({
+        query: "软件实施工程师",
+      });
+      if (!jobs[0]) throw new Error("Smoke job not found");
+      await window.jobWorkbench.saveAiSettings({
+        provider: "custom",
+        baseUrl,
+        model: "mock-evidence-model",
+        dailyRequestLimit: 5,
+        apiKey: "smoke-remote-key",
+      });
+      return window.jobWorkbench.createAiAnalysisTask({
+        jobId: jobs[0].id,
+        force: true,
+      });
+    }, aiBaseUrl);
+    let remoteTaskStatus = null;
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      remoteTaskStatus = await page.evaluate(async (taskId) => {
+        const tasks = await window.jobWorkbench.listTasks();
+        return tasks.find((task) => task.id === taskId) || null;
+      }, remoteTask.id);
+      if (
+        remoteTaskStatus?.status === "succeeded" ||
+        remoteTaskStatus?.status === "failed"
+      ) {
+        break;
+      }
+      await page.waitForTimeout(250);
+    }
+    if (remoteTaskStatus?.status !== "succeeded") {
+      throw new Error(
+        `Remote AI task failed: ${JSON.stringify(remoteTaskStatus)} auth=${aiAuthorization}`,
+      );
+    }
+    await page.locator(".ai-job-list button").first().click();
+    await page.waitForSelector("text=mock-evidence-model");
+    if (aiAuthorization !== "Bearer smoke-remote-key") {
+      throw new Error(`Unexpected AI authorization: ${aiAuthorization}`);
+    }
+    const cachedTask = await page.evaluate(async () => {
+      const jobs = await window.jobWorkbench.listJobs({
+        query: "软件实施工程师",
+      });
+      if (!jobs[0]) throw new Error("Smoke job not found");
+      return window.jobWorkbench.createAiAnalysisTask({
+        jobId: jobs[0].id,
+        force: false,
+      });
+    });
+    let cachedTaskStatus = null;
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      cachedTaskStatus = await page.evaluate(async (taskId) => {
+        const tasks = await window.jobWorkbench.listTasks();
+        return tasks.find((task) => task.id === taskId) || null;
+      }, cachedTask.id);
+      if (cachedTaskStatus?.status === "succeeded") break;
+      if (cachedTaskStatus?.status === "failed") break;
+      await page.waitForTimeout(100);
+    }
+    if (
+      cachedTaskStatus?.status !== "succeeded" ||
+      cachedTaskStatus.result?.cached !== true ||
+      aiRequestCount !== 1
+    ) {
+      throw new Error(
+        `AI cache check failed: ${JSON.stringify({ cachedTaskStatus, aiRequestCount })}`,
+      );
+    }
+    await page.screenshot({
+      path: path.join(__dirname, "..", "artifacts", "smoke-ai-remote.png"),
+      fullPage: true,
+    });
+    await page.evaluate(async () => {
+      await window.jobWorkbench.clearAiApiKey();
+      await window.jobWorkbench.saveAiSettings({
+        provider: "local",
+        baseUrl: "",
+        model: "local-rules-v1",
+        dailyRequestLimit: 20,
+      });
+    });
+    await page.locator("nav").getByRole("button", { name: "职位池" }).click();
+    await page.waitForSelector("text=软件实施工程师");
     await page.locator(".job-select").check();
     await page.getByRole("button", { name: "归档选中" }).click();
     await page.waitForSelector("text=还没有岗位");
@@ -143,6 +383,9 @@ async function main() {
     );
   } finally {
     await app.close();
+    await new Promise((resolve, reject) =>
+      aiServer.close((error) => (error ? reject(error) : resolve())),
+    );
     fs.rmSync(userData, { recursive: true, force: true });
   }
 }

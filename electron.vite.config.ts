@@ -12,6 +12,7 @@ export default defineConfig({
           "collector-worker": path.resolve(
             "src/main/collector-worker.ts",
           ),
+          "ai-worker": path.resolve("src/main/ai-worker.ts"),
         },
       },
     },

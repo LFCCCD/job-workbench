@@ -19,11 +19,17 @@ Windows 本地求职管理工具。当前 `feat/m2-data-core` 分支已打通：
 - 低频搜索、短期结果缓存、候选去重及风险即刻停止
 - 采集候选预览、批量忽略和人工确认后事务导入
 - 采集岗位与已有岗位按 BOSS 来源 ID 去重，更新时保留状态、收藏和备注
+- 独立 AI Analysis Worker 和本地规则预分析
+- DeepSeek、DashScope、自定义 OpenAI 兼容 Provider
+- AI API Key 使用 Electron `safeStorage` 系统加密，不进入 SQLite 和日志
+- 单岗位 JD 摘要、硬性要求、事实匹配、风险、面试题和待确认问题
+- JD 原句与已核实 factId 证据校验，引用不匹配时拒绝保存
+- AI 分析缓存、每日远程调用上限、任务取消、重试和失败记录
 - 已验证简历事实导出 PDF
 - Windows NSIS 安装包
 
 采集只保存岗位候选，不自动投递、不自动发送招聘消息，也不绕过验证码或风控。
-当前版本仍不包含 AI 分析和完整 CRM。
+当前版本仍不包含完整 CRM、多岗位 AI 比较和实时招聘消息。
 
 ## 下载
 
@@ -73,7 +79,7 @@ npm run dist
 ## 测试
 
 - `npm run check`：TypeScript 类型检查
-- `npm test`：SQLite、Schema、Task 恢复、状态、归档、备份、候选暂存和 BOSS 适配器测试
+- `npm test`：SQLite、Schema、Task 恢复、岗位流程、BOSS 适配器、AI 证据校验和 Provider 测试
 - `node scripts/electron-smoke.cjs`：真实 Electron 流程测试
 
 ## BOSS 采集
@@ -86,6 +92,20 @@ npm run dist
 
 专用 Edge 使用应用数据目录下的 `collector-edge-profile`，不会读取日常浏览器资料。
 搜索响应只缓存标准化后的岗位候选，不保存 Cookie、Token 或认证请求头。
+
+## AI 分析
+
+AI 分析默认使用无需联网的本地预分析。也可以配置 DeepSeek、DashScope 或任意
+OpenAI Chat Completions 兼容接口：
+
+1. 打开“AI 分析”，选择 Provider 并填写 Base URL、模型和 API Key。
+2. 点击“保存设置”；API Key 通过 Windows 系统加密保存在应用数据目录。
+3. 在职位池或 AI 分析页选择岗位，然后点击“开始分析”。
+4. 分析结果会展示 JD 引用、已核实事实证据、风险和面试准备。
+
+远程请求只包含当前岗位 JD、已核实事实、简历版本名称和摘要，不发送姓名、电话、
+邮箱、Cookie 或招聘聊天。模型输出必须通过共享 Schema、JD 原文匹配和事实 ID
+白名单校验，否则分析失败且不会写入有效结果。
 
 ## 技术决策
 

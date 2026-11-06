@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
+  AiAnalyzeRequest,
+  AiSettingsInput,
   CollectorRequest,
   JobFilters,
   JobStatus,
@@ -53,6 +55,19 @@ const api: JobWorkbenchApi = {
     ipcRenderer.invoke("workbench:import-collector-candidates", { ids }),
   dismissCollectorCandidates: (ids: string[]) =>
     ipcRenderer.invoke("workbench:dismiss-collector-candidates", { ids }),
+  getAiSettings: () => ipcRenderer.invoke("workbench:ai-settings"),
+  saveAiSettings: (input: AiSettingsInput) =>
+    ipcRenderer.invoke("workbench:save-ai-settings", input),
+  clearAiApiKey: () => ipcRenderer.invoke("workbench:clear-ai-key"),
+  createAiAnalysisTask: (input: AiAnalyzeRequest) =>
+    ipcRenderer.invoke("workbench:create-ai-analysis", input),
+  getJobAiAnalysis: (jobId: string) =>
+    ipcRenderer.invoke("workbench:job-ai-analysis", jobId),
+  listAiAnalyses: (limit?: number) =>
+    ipcRenderer.invoke("workbench:list-ai-analyses", limit),
+  getAiUsage: () => ipcRenderer.invoke("workbench:ai-usage"),
+  deleteAiAnalysis: (id: string) =>
+    ipcRenderer.invoke("workbench:delete-ai-analysis", { id }),
   cancelTask: (id: string) =>
     ipcRenderer.invoke("workbench:cancel-task", id),
   retryTask: (id: string) => ipcRenderer.invoke("workbench:retry-task", id),

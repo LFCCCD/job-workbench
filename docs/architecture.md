@@ -21,7 +21,7 @@ The first milestone proves the complete local desktop path:
 - PDF rendering uses a hidden BrowserWindow and never loads remote resources.
 - Data-layer migration is transactional, checked with `PRAGMA integrity_check`, and preceded by
   a safety backup.
-- `schema_migrations` records schema versions. The current schema version is 4.
+- `schema_migrations` records schema versions. The current schema version is 5.
 - Durable tasks are stored in SQLite with idempotency keys and interrupted-on-restart handling.
 - The task center executes registered task types in the main process, exposes progress and
   errors through IPC, and supports cancel, retry, and finished-record cleanup.
@@ -34,6 +34,13 @@ The first milestone proves the complete local desktop path:
   process allowed to import candidates into the job table.
 - Collection stops on login failure, risk-control messages, CAPTCHA messages, or abnormal
   responses. It never automates applications, messages, CAPTCHA, or rate-limit bypasses.
+- AI analysis runs in a second `utilityProcess`. The main process prepares a job/fact snapshot,
+  sends an ephemeral Provider credential to the worker, validates the result, and writes it to
+  SQLite.
+- AI results are cached by input hash, Provider, model, prompt version, and Schema version.
+- Every AI analysis is checked against exact JD quotes and a verified `factId` allowlist.
+- Remote AI credentials are encrypted with Electron `safeStorage`; they are never stored in
+  SQLite, task payloads, logs, or exported diagnostics.
 
 ## Database decision
 
@@ -43,7 +50,6 @@ to avoid native ABI rebuilds and installer packaging risk.
 
 ## Deferred work
 
-- AI Provider and AI utility process
 - Full CRM and interview records
 - Full multi-version resume editor
 - Auto update and code signing

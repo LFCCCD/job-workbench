@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { JobDatabase } from "./database";
 import { TaskService } from "./task-service";
+import { analyzeWithLocalRules } from "./ai-analysis";
 
 const roots: string[] = [];
 
@@ -52,7 +53,7 @@ describe("JobDatabase", () => {
         total: 1,
         active: 1,
         archived: 0,
-        schemaVersion: 4,
+        schemaVersion: 5,
         pendingTasks: 0,
       });
 
@@ -275,6 +276,54 @@ describe("JobDatabase", () => {
     }
   });
 
+  it("stores AI analysis results and reuses them by cache key", () => {
+    const root = createRoot();
+    const database = new JobDatabase(root);
+    try {
+      const job = database.addJob({
+        title: "ERP实施工程师",
+        company: "智能制造公司",
+        salary: "7-10K",
+        city: "宁波",
+        link: "",
+        description:
+          "负责ERP系统实施、客户培训和上线交付。需要了解SQL和MySQL，能够接受偶尔出差。",
+      });
+      const context = database.getAiJobContext(job.id);
+      const result = analyzeWithLocalRules(context);
+      const running = database.createAiAnalysis({
+        jobId: job.id,
+        status: "running",
+        provider: "local",
+        model: "local-rules-v1",
+        cacheKey: "cache-test",
+        inputHash: "input-test",
+        promptVersion: 1,
+        schemaVersion: 1,
+      });
+      database.completeAiAnalysis(running.id, {
+        result,
+        latencyMs: 12,
+        promptTokens: 0,
+        completionTokens: 0,
+      });
+      expect(database.findCachedAiAnalysis("cache-test")).toMatchObject({
+        status: "succeeded",
+        provider: "local",
+        result: { confidence: result.confidence },
+      });
+      expect(database.getLatestAiAnalysis(job.id)?.id).toBe(running.id);
+      expect(database.getAiUsage(20)).toMatchObject({
+        todayRemoteCalls: 0,
+        totalAnalyses: 1,
+      });
+      expect(database.deleteAiAnalysis(running.id)).toBe(1);
+      expect(database.getLatestAiAnalysis(job.id)).toBeNull();
+    } finally {
+      database.close();
+    }
+  });
+
   it("persists tasks, resumes queued work and clears finished records", async () => {
     const root = createRoot();
     const database = new JobDatabase(root);
@@ -327,7 +376,7 @@ describe("JobDatabase", () => {
           preview.counts.jobs,
         );
         expect(fs.existsSync(result.backupPath)).toBe(true);
-        expect(database.getSchemaVersion()).toBe(4);
+        expect(database.getSchemaVersion()).toBe(5);
       } finally {
         database.close();
       }

@@ -9,9 +9,14 @@ import {
 } from "electron";
 import { JobDatabase } from "./database";
 import { TaskService } from "./task-service";
+import { AiAnalysisService } from "./ai-service";
+import { AiSettingsService } from "./ai-settings";
 import { CollectorBrowserService } from "./collector-browser";
 import { CollectorService } from "./collector-service";
 import {
+  AiAnalysisIdSchema,
+  AiAnalyzeRequestSchema,
+  AiSettingsInputSchema,
   ArchiveJobsSchema,
   CollectorIdsSchema,
   CollectorRequestSchema,
@@ -36,6 +41,7 @@ let mainWindow: BrowserWindow | null = null;
 let database: JobDatabase | null = null;
 let taskService: TaskService | null = null;
 let collectorBrowser: CollectorBrowserService | null = null;
+let aiSettings: AiSettingsService | null = null;
 let pendingMigration: MigrationPreview | null = null;
 
 function getDatabase(): JobDatabase {
@@ -51,7 +57,13 @@ function getTaskService(): TaskService {
       getDatabase(),
       path.join(currentDir, "collector-worker.js"),
     );
-    taskService = new TaskService(getDatabase(), collector);
+    const settings = getAiSettingsService();
+    const ai = new AiAnalysisService(
+      getDatabase(),
+      settings,
+      path.join(currentDir, "ai-worker.js"),
+    );
+    taskService = new TaskService(getDatabase(), collector, ai);
   }
   return taskService;
 }
@@ -59,6 +71,14 @@ function getTaskService(): TaskService {
 function getCollectorBrowser(): CollectorBrowserService {
   collectorBrowser ||= new CollectorBrowserService(app.getPath("userData"));
   return collectorBrowser;
+}
+
+function getAiSettingsService(): AiSettingsService {
+  aiSettings ||= new AiSettingsService(
+    getDatabase(),
+    app.getPath("userData"),
+  );
+  return aiSettings;
 }
 
 function escapeHtml(value: unknown): string {
@@ -183,6 +203,40 @@ function registerIpc() {
     const { ids } = CollectorIdsSchema.parse(input);
     const count = getDatabase().dismissCollectorCandidates(ids);
     return { ok: true, message: `已移除 ${count} 个候选岗位` };
+  });
+  ipcMain.handle("workbench:ai-settings", () => {
+    return getAiSettingsService().getView();
+  });
+  ipcMain.handle("workbench:save-ai-settings", (_event, input) => {
+    return getAiSettingsService().save(AiSettingsInputSchema.parse(input));
+  });
+  ipcMain.handle("workbench:clear-ai-key", () => {
+    getAiSettingsService().clearApiKey();
+    return { ok: true, message: "AI API Key 已清除" };
+  });
+  ipcMain.handle("workbench:create-ai-analysis", (_event, input) => {
+    const request = AiAnalyzeRequestSchema.parse(input);
+    return getTaskService().enqueue("ai-analysis", request);
+  });
+  ipcMain.handle("workbench:job-ai-analysis", (_event, jobId) => {
+    return getDatabase().getLatestAiAnalysis(String(jobId));
+  });
+  ipcMain.handle("workbench:list-ai-analyses", (_event, limit) => {
+    return getDatabase().listAiAnalyses(
+      typeof limit === "number" ? limit : 30,
+    );
+  });
+  ipcMain.handle("workbench:ai-usage", async () => {
+    const settings = await getAiSettingsService().getView();
+    return getDatabase().getAiUsage(settings.dailyRequestLimit);
+  });
+  ipcMain.handle("workbench:delete-ai-analysis", (_event, input) => {
+    const { id } = AiAnalysisIdSchema.parse(input);
+    const deleted = getDatabase().deleteAiAnalysis(id);
+    return {
+      ok: true,
+      message: deleted ? "分析记录已删除" : "分析记录不存在",
+    };
   });
   ipcMain.handle("workbench:cancel-task", (_event, id) => {
     return getTaskService().cancel(String(id));

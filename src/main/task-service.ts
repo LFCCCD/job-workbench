@@ -1,5 +1,9 @@
 import type { OperationResult, TaskRecord, TaskStatus } from "../shared/contracts";
-import { CollectorRequestSchema } from "../shared/contracts";
+import {
+  AiAnalyzeRequestSchema,
+  CollectorRequestSchema,
+} from "../shared/contracts";
+import type { AiAnalysisService } from "./ai-service";
 import type { CollectorService } from "./collector-service";
 import { JobDatabase } from "./database";
 
@@ -21,6 +25,7 @@ export class TaskService {
   constructor(
     private readonly database: JobDatabase,
     private readonly collector: CollectorService | null = null,
+    private readonly ai: AiAnalysisService | null = null,
   ) {
     this.handlers.set("backup", async () => {
       const path = await this.database.createBackup("scheduled");
@@ -42,6 +47,12 @@ export class TaskService {
           cachedSearches: collected.cachedSearches,
           warnings: collected.warnings,
         };
+      });
+    }
+    if (this.ai) {
+      this.handlers.set("ai-analysis", async (payload, context) => {
+        const request = AiAnalyzeRequestSchema.parse(payload);
+        return this.ai!.analyzeJob(request.jobId, request.force, context);
       });
     }
   }

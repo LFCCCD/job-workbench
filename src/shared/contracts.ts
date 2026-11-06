@@ -136,6 +136,107 @@ export const CollectorIdsSchema = z.object({
   ids: z.array(z.string().min(1).max(500)).min(1).max(500),
 });
 
+export const AiProviderKindSchema = z.enum([
+  "local",
+  "deepseek",
+  "dashscope",
+  "custom",
+]);
+
+export const AiEvidenceSchema = z
+  .object({
+    source: z.enum(["jd", "fact"]),
+    factId: z.string().trim().max(50).nullable().default(null),
+    quote: z.string().trim().min(1).max(2_000),
+  })
+  .strict();
+
+export const AiRequirementSchema = z
+  .object({
+    requirement: z.string().trim().min(1).max(500),
+    status: z.enum(["satisfied", "partial", "missing", "unknown"]),
+    evidence: z.array(AiEvidenceSchema).max(6).default([]),
+    note: z.string().trim().max(1_000).default(""),
+  })
+  .strict();
+
+export const AiAnalysisResultSchema = z
+  .object({
+    jobSummary: z
+      .object({
+        responsibilities: z.string().trim().min(1).max(1_500),
+        workMode: z.string().trim().max(500).default(""),
+        evidence: z.array(AiEvidenceSchema).min(1).max(5),
+      })
+      .strict(),
+    hardRequirements: z.array(AiRequirementSchema).max(15),
+    bonuses: z
+      .array(
+        z
+          .object({
+            text: z.string().trim().min(1).max(500),
+            evidence: z.array(AiEvidenceSchema).max(5).default([]),
+          })
+          .strict(),
+      )
+      .max(12),
+    risks: z
+      .array(
+        z
+          .object({
+            severity: z.enum(["high", "medium", "low"]),
+            title: z.string().trim().min(1).max(300),
+            evidence: z.array(AiEvidenceSchema).min(1).max(5),
+            question: z.string().trim().max(500).default(""),
+          })
+          .strict(),
+      )
+      .max(12),
+    interviewQuestions: z
+      .array(
+        z
+          .object({
+            category: z.enum(["技术", "项目", "业务", "行为"]),
+            question: z.string().trim().min(1).max(500),
+            preparation: z.string().trim().max(1_000).default(""),
+          })
+          .strict(),
+      )
+      .max(15),
+    questionsToAsk: z.array(z.string().trim().min(1).max(500)).max(15),
+    resumeRecommendation: z
+      .object({
+        versionName: z.string().trim().max(200).default(""),
+        gaps: z.array(z.string().trim().max(500)).max(12),
+      })
+      .strict(),
+    confidence: z.enum(["high", "medium", "low"]),
+    confidenceReason: z.string().trim().min(1).max(800),
+    unknowns: z.array(z.string().trim().min(1).max(500)).max(20),
+  })
+  .strict();
+
+export const AiSettingsInputSchema = z
+  .object({
+    provider: AiProviderKindSchema,
+    baseUrl: z.string().trim().max(500).default(""),
+    model: z.string().trim().max(200).default(""),
+    dailyRequestLimit: z.number().int().min(1).max(100).default(20),
+    apiKey: z.string().trim().max(500).optional(),
+  })
+  .strict();
+
+export const AiAnalyzeRequestSchema = z
+  .object({
+    jobId: z.string().min(1).max(500),
+    force: z.boolean().default(false),
+  })
+  .strict();
+
+export const AiAnalysisIdSchema = z.object({
+  id: z.string().min(1).max(500),
+});
+
 export type JobStatus = z.infer<typeof JobStatusSchema>;
 export type ManualJobInput = z.infer<typeof ManualJobSchema>;
 export type MigrationResult = z.infer<typeof MigrationResultSchema>;
@@ -145,6 +246,11 @@ export type CollectorCity = z.infer<typeof CollectorCitySchema>;
 export type CollectorRequest = z.infer<typeof CollectorRequestSchema>;
 export type CollectorCandidate = z.infer<typeof CollectorCandidateSchema>;
 export type CollectorCacheEntry = z.infer<typeof CollectorCacheEntrySchema>;
+export type AiProviderKind = z.infer<typeof AiProviderKindSchema>;
+export type AiEvidence = z.infer<typeof AiEvidenceSchema>;
+export type AiAnalysisResult = z.infer<typeof AiAnalysisResultSchema>;
+export type AiSettingsInput = z.infer<typeof AiSettingsInputSchema>;
+export type AiAnalyzeRequest = z.infer<typeof AiAnalyzeRequestSchema>;
 
 export interface JobRecord {
   id: string;
@@ -242,6 +348,72 @@ export interface CollectorStatus {
   endpoint: string;
 }
 
+export interface AiResumeFactInput {
+  id: string;
+  kind: string;
+  title: string;
+  organization: string;
+  role: string;
+  startDate: string;
+  endDate: string;
+  location: string;
+  bullets: string[];
+  skills: string[];
+  evidence: string;
+}
+
+export interface AiResumeVersionInput {
+  id: string;
+  name: string;
+  targetRole: string;
+  summary: string;
+  selectedFactIds: string[];
+}
+
+export interface AiJobContext {
+  job: JobRecord;
+  facts: AiResumeFactInput[];
+  resumeVersions: AiResumeVersionInput[];
+  factsVersion: string;
+}
+
+export interface AiSettingsView {
+  provider: AiProviderKind;
+  baseUrl: string;
+  model: string;
+  dailyRequestLimit: number;
+  hasApiKey: boolean;
+  encryptionAvailable: boolean;
+}
+
+export type AiAnalysisStatus = "running" | "succeeded" | "failed" | "cancelled";
+
+export interface AiAnalysisRecord {
+  id: string;
+  jobId: string;
+  status: AiAnalysisStatus;
+  provider: string;
+  model: string;
+  cacheKey: string;
+  promptVersion: number;
+  schemaVersion: number;
+  result: AiAnalysisResult | null;
+  error: string;
+  cachedFromId: string | null;
+  latencyMs: number;
+  promptTokens: number;
+  completionTokens: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AiUsageSummary {
+  todayRemoteCalls: number;
+  dailyLimit: number;
+  totalAnalyses: number;
+  cachedHits: number;
+}
+
 export type TaskStatus =
   | "queued"
   | "running"
@@ -292,6 +464,14 @@ export interface JobWorkbenchApi {
   listCollectorPreview(): Promise<CollectorPreviewData>;
   importCollectorCandidates(ids: string[]): Promise<CollectorImportResult>;
   dismissCollectorCandidates(ids: string[]): Promise<OperationResult>;
+  getAiSettings(): Promise<AiSettingsView>;
+  saveAiSettings(input: AiSettingsInput): Promise<AiSettingsView>;
+  clearAiApiKey(): Promise<OperationResult>;
+  createAiAnalysisTask(input: AiAnalyzeRequest): Promise<TaskRecord>;
+  getJobAiAnalysis(jobId: string): Promise<AiAnalysisRecord | null>;
+  listAiAnalyses(limit?: number): Promise<AiAnalysisRecord[]>;
+  getAiUsage(): Promise<AiUsageSummary>;
+  deleteAiAnalysis(id: string): Promise<OperationResult>;
   cancelTask(id: string): Promise<TaskRecord>;
   retryTask(id: string): Promise<TaskRecord>;
   clearFinishedTasks(): Promise<OperationResult>;

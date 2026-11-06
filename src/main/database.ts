@@ -1,16 +1,23 @@
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   DatabaseSync,
   backup as backupDatabase,
 } from "node:sqlite";
 import {
+  AiAnalysisResultSchema,
   CollectorCacheEntrySchema,
   CollectorCandidateSchema,
   ListJobsSchema,
 } from "../shared/contracts";
 import type {
+  AiAnalysisRecord,
+  AiAnalysisStatus,
+  AiAnalysisResult,
+  AiJobContext,
+  AiResumeFactInput,
+  AiResumeVersionInput,
   CollectorCacheEntry,
   CollectorCandidate,
   CollectorCandidatePreview,
@@ -57,7 +64,7 @@ const JOB_COLUMNS = `
   last_seen_at, updated_at
 `;
 
-const CURRENT_SCHEMA_VERSION = 4;
+const CURRENT_SCHEMA_VERSION = 5;
 const REQUIRED_TABLES = [
   "jobs",
   "job_events",
@@ -65,6 +72,7 @@ const REQUIRED_TABLES = [
   "resume_facts",
   "resume_versions",
   "app_settings",
+  "ai_analyses",
 ] as const;
 
 export class JobDatabase {
@@ -241,12 +249,36 @@ export class JobDatabase {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS ai_analyses (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        status TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        cache_key TEXT NOT NULL,
+        input_hash TEXT NOT NULL,
+        prompt_version INTEGER NOT NULL,
+        schema_version INTEGER NOT NULL,
+        result_json TEXT NOT NULL DEFAULT '{}',
+        error TEXT NOT NULL DEFAULT '',
+        cached_from_id TEXT,
+        latency_ms INTEGER NOT NULL DEFAULT 0,
+        prompt_tokens INTEGER NOT NULL DEFAULT 0,
+        completion_tokens INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
       CREATE INDEX IF NOT EXISTS idx_jobs_archived ON jobs(archived_at);
       CREATE INDEX IF NOT EXISTS idx_job_events_job ON job_events(job_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, created_at);
       CREATE INDEX IF NOT EXISTS idx_collector_candidates_state
         ON collector_candidates(state, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_ai_analyses_job
+        ON ai_analyses(job_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_ai_analyses_cache
+        ON ai_analyses(cache_key, status, created_at DESC);
     `);
 
     this.ensureArchivedColumn();
@@ -342,6 +374,19 @@ export class JobDatabase {
         throw new Error("M2 collector migration prerequisites are missing");
       }
       record.run(4, "collector-candidate-staging-and-cache", timestamp);
+    }
+    if (this.getSchemaVersion() < 5) {
+      const tableNames = new Set(
+        (
+          this.db
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .all() as SqlRow[]
+        ).map((row) => String(row.name)),
+      );
+      if (!tableNames.has("ai_analyses")) {
+        throw new Error("M4 AI analysis migration prerequisites are missing");
+      }
+      record.run(5, "ai-analysis-results-and-cache", timestamp);
     }
     if (this.getSchemaVersion() > CURRENT_SCHEMA_VERSION) {
       throw new Error("数据库版本高于当前应用版本");
@@ -791,6 +836,283 @@ export class JobDatabase {
       throw error;
     }
     return entries.length;
+  }
+
+  getAppSetting(key: string): string | null {
+    const row = this.db
+      .prepare("SELECT value FROM app_settings WHERE key = ?")
+      .get(key) as SqlRow | undefined;
+    return row ? String(row.value) : null;
+  }
+
+  setAppSetting(key: string, value: string): void {
+    this.db
+      .prepare(`
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+          value = excluded.value,
+          updated_at = excluded.updated_at
+      `)
+      .run(key, value, new Date().toISOString());
+  }
+
+  getAiJobContext(jobId: string): AiJobContext {
+    const job = this.getJob(jobId);
+    if (!job) throw new Error("岗位不存在");
+    const factRows = this.db
+      .prepare(
+        "SELECT * FROM resume_facts WHERE verified = 1 ORDER BY sort_order, id",
+      )
+      .all() as SqlRow[];
+    const facts = factRows.map(
+      (row): AiResumeFactInput => ({
+        id: String(row.id),
+        kind: String(row.kind || ""),
+        title: String(row.title || ""),
+        organization: String(row.organization || ""),
+        role: String(row.role || ""),
+        startDate: String(row.start_date || ""),
+        endDate: String(row.end_date || ""),
+        location: String(row.location || ""),
+        bullets: JSON.parse(String(row.bullets_json || "[]")) as string[],
+        skills: JSON.parse(String(row.skills_json || "[]")) as string[],
+        evidence: String(row.evidence || ""),
+      }),
+    );
+    const versionRows = this.db
+      .prepare(
+        "SELECT * FROM resume_versions ORDER BY updated_at DESC, id DESC",
+      )
+      .all() as SqlRow[];
+    const resumeVersions = versionRows.map(
+      (row): AiResumeVersionInput => ({
+        id: String(row.id),
+        name: String(row.name || ""),
+        targetRole: String(row.target_role || ""),
+        summary: String(row.summary || ""),
+        selectedFactIds: JSON.parse(
+          String(row.selected_fact_ids_json || "[]"),
+        ) as string[],
+      }),
+    );
+    const factsVersion = createHash("sha256")
+      .update(JSON.stringify(facts))
+      .digest("hex");
+    return { job, facts, resumeVersions, factsVersion };
+  }
+
+  createAiAnalysis(input: {
+    jobId: string;
+    status: AiAnalysisStatus;
+    provider: string;
+    model: string;
+    cacheKey: string;
+    inputHash: string;
+    promptVersion: number;
+    schemaVersion: number;
+    result?: AiAnalysisResult | null;
+    error?: string;
+    cachedFromId?: string | null;
+    latencyMs?: number;
+    promptTokens?: number;
+    completionTokens?: number;
+  }): AiAnalysisRecord {
+    const id = `analysis-${randomUUID()}`;
+    const timestamp = new Date().toISOString();
+    this.db
+      .prepare(`
+        INSERT INTO ai_analyses (
+          id, job_id, status, provider, model, cache_key, input_hash,
+          prompt_version, schema_version, result_json, error, cached_from_id,
+          latency_ms, prompt_tokens, completion_tokens, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        id,
+        input.jobId,
+        input.status,
+        input.provider,
+        input.model,
+        input.cacheKey,
+        input.inputHash,
+        input.promptVersion,
+        input.schemaVersion,
+        JSON.stringify(input.result || null),
+        input.error || "",
+        input.cachedFromId || null,
+        input.latencyMs || 0,
+        input.promptTokens || 0,
+        input.completionTokens || 0,
+        timestamp,
+        timestamp,
+      );
+    return this.getAiAnalysis(id)!;
+  }
+
+  completeAiAnalysis(
+    id: string,
+    input: {
+      result: AiAnalysisResult;
+      latencyMs: number;
+      promptTokens: number;
+      completionTokens: number;
+    },
+  ): AiAnalysisRecord {
+    this.db
+      .prepare(`
+        UPDATE ai_analyses SET
+          status = 'succeeded',
+          result_json = ?,
+          error = '',
+          latency_ms = ?,
+          prompt_tokens = ?,
+          completion_tokens = ?,
+          updated_at = ?
+        WHERE id = ?
+      `)
+      .run(
+        JSON.stringify(input.result),
+        input.latencyMs,
+        input.promptTokens,
+        input.completionTokens,
+        new Date().toISOString(),
+        id,
+      );
+    return this.getAiAnalysis(id)!;
+  }
+
+  finishAiAnalysis(
+    id: string,
+    status: "failed" | "cancelled" | "running",
+    error: string,
+  ): AiAnalysisRecord {
+    this.db
+      .prepare(`
+        UPDATE ai_analyses
+        SET status = ?, error = ?, updated_at = ?
+        WHERE id = ?
+      `)
+      .run(status, error.slice(0, 4_000), new Date().toISOString(), id);
+    return this.getAiAnalysis(id)!;
+  }
+
+  findCachedAiAnalysis(cacheKey: string): AiAnalysisRecord | null {
+    const row = this.db
+      .prepare(`
+        SELECT * FROM ai_analyses
+        WHERE cache_key = ? AND status = 'succeeded'
+        ORDER BY created_at DESC
+        LIMIT 1
+      `)
+      .get(cacheKey) as SqlRow | undefined;
+    return row ? this.rowToAiAnalysis(row) : null;
+  }
+
+  getAiAnalysis(id: string): AiAnalysisRecord | null {
+    const row = this.db
+      .prepare("SELECT * FROM ai_analyses WHERE id = ?")
+      .get(id) as SqlRow | undefined;
+    return row ? this.rowToAiAnalysis(row) : null;
+  }
+
+  getLatestAiAnalysis(jobId: string): AiAnalysisRecord | null {
+    const row = this.db
+      .prepare(`
+        SELECT * FROM ai_analyses
+        WHERE job_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+      `)
+      .get(jobId) as SqlRow | undefined;
+    return row ? this.rowToAiAnalysis(row) : null;
+  }
+
+  listAiAnalyses(limit = 30): AiAnalysisRecord[] {
+    const safeLimit = Math.max(1, Math.min(200, Math.trunc(limit)));
+    return (
+      this.db
+        .prepare(
+          "SELECT * FROM ai_analyses ORDER BY created_at DESC LIMIT ?",
+        )
+        .all(safeLimit) as SqlRow[]
+    ).map((row) => this.rowToAiAnalysis(row));
+  }
+
+  getAiUsage(dailyLimit: number): {
+    todayRemoteCalls: number;
+    dailyLimit: number;
+    totalAnalyses: number;
+    cachedHits: number;
+  } {
+    const dayStart = new Date();
+    dayStart.setHours(0, 0, 0, 0);
+    const todayRemoteCalls = Number(
+      (
+        this.db
+          .prepare(`
+            SELECT COUNT(*) AS count FROM ai_analyses
+            WHERE provider <> 'local'
+              AND cached_from_id IS NULL
+              AND created_at >= ?
+          `)
+          .get(dayStart.toISOString()) as SqlRow
+      ).count || 0,
+    );
+    const totalAnalyses = Number(
+      (
+        this.db
+          .prepare("SELECT COUNT(*) AS count FROM ai_analyses")
+          .get() as SqlRow
+      ).count || 0,
+    );
+    const cachedHits = Number(
+      (
+        this.db
+          .prepare(
+            "SELECT COUNT(*) AS count FROM ai_analyses WHERE cached_from_id IS NOT NULL",
+          )
+          .get() as SqlRow
+      ).count || 0,
+    );
+    return { todayRemoteCalls, dailyLimit, totalAnalyses, cachedHits };
+  }
+
+  deleteAiAnalysis(id: string): number {
+    const result = this.db
+      .prepare("DELETE FROM ai_analyses WHERE id = ?")
+      .run(id);
+    return Number(result.changes);
+  }
+
+  private rowToAiAnalysis(row: SqlRow): AiAnalysisRecord {
+    let result: AiAnalysisResult | null = null;
+    const resultJson = String(row.result_json || "");
+    if (resultJson && !["{}", "null"].includes(resultJson)) {
+      result = AiAnalysisResultSchema.parse(
+        JSON.parse(resultJson),
+      );
+    }
+    return {
+      id: String(row.id),
+      jobId: String(row.job_id),
+      status: String(row.status) as AiAnalysisStatus,
+      provider: String(row.provider),
+      model: String(row.model),
+      cacheKey: String(row.cache_key),
+      promptVersion: Number(row.prompt_version || 0),
+      schemaVersion: Number(row.schema_version || 0),
+      result,
+      error: String(row.error || ""),
+      cachedFromId: row.cached_from_id
+        ? String(row.cached_from_id)
+        : null,
+      latencyMs: Number(row.latency_ms || 0),
+      promptTokens: Number(row.prompt_tokens || 0),
+      completionTokens: Number(row.completion_tokens || 0),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
   }
 
   private rowToCollectorCandidate(row: SqlRow): CollectorCandidate {
@@ -1390,6 +1712,25 @@ export class JobDatabase {
             "created_at",
             "updated_at",
           ],
+          ai_analyses: [
+            "id",
+            "job_id",
+            "status",
+            "provider",
+            "model",
+            "cache_key",
+            "input_hash",
+            "prompt_version",
+            "schema_version",
+            "result_json",
+            "error",
+            "cached_from_id",
+            "latency_ms",
+            "prompt_tokens",
+            "completion_tokens",
+            "created_at",
+            "updated_at",
+          ],
         })) {
           if (!sourceTables.has(table)) continue;
           const rows = source
@@ -1464,6 +1805,7 @@ export class JobDatabase {
         this.db.exec("DELETE FROM app_settings");
         this.db.exec("DELETE FROM collector_candidates");
         this.db.exec("DELETE FROM collector_cache");
+        this.db.exec("DELETE FROM ai_analyses");
         for (const table of [
           "jobs",
           "job_events",
@@ -1474,6 +1816,7 @@ export class JobDatabase {
           "app_settings",
           "collector_candidates",
           "collector_cache",
+          "ai_analyses",
         ]) {
           if (!sourceTables.has(table)) continue;
           const target = targetColumns(table);
