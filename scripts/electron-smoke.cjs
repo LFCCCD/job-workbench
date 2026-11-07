@@ -95,8 +95,8 @@ async function main() {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(
         JSON.stringify({
-          tag_name: "v0.3.0-m3",
-          name: "求职工作台 M3 Test",
+          tag_name: "v1.1.0-m1",
+          name: "求职工作台 v1.1 Test",
           body: "更新检查冒烟测试版本。",
           html_url: "https://github.com/LFCCCD/job-workbench/releases",
           published_at: "2026-11-07T00:00:00.000Z",
@@ -468,13 +468,13 @@ async function main() {
       .locator(".system-updates")
       .getByRole("button", { name: "检查更新" })
       .click();
-    await page.waitForSelector("text=v0.3.0-m3");
+    await page.waitForSelector("text=v1.1.0-m1");
     const updateHealth = await page.evaluate(() =>
       window.jobWorkbench.getSystemHealth(),
     );
     if (
       !updateHealth.updateInfo?.available ||
-      updateHealth.updateInfo.latestTag !== "v0.3.0-m3"
+      updateHealth.updateInfo.latestTag !== "v1.1.0-m1"
     ) {
       throw new Error(
         `Update check failed: ${JSON.stringify(updateHealth.updateInfo)}`,

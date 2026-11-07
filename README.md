@@ -1,6 +1,6 @@
 # 求职工作台
 
-Windows 本地求职管理工具。当前 `feat/m2-data-core` 分支已打通：
+Windows 本地求职管理工具。当前正式版已打通：
 
 - Electron 桌面外壳、React 界面和 Typed IPC
 - Electron 内置 `node:sqlite` 数据库
@@ -52,7 +52,7 @@ Windows 本地求职管理工具。当前 `feat/m2-data-core` 分支已打通：
 
 ## 下载
 
-[Windows x64 M2 Beta 安装程序](https://github.com/LFCCCD/job-workbench/releases/download/v0.2.1-m2/Setup.0.2.1-m2.exe)
+[Windows x64 正式版安装程序](https://github.com/LFCCCD/job-workbench/releases/download/v1.0.0/Setup.1.0.0.exe)
 
 SHA256：
 
@@ -85,7 +85,7 @@ npm run dist
 
 构建产物：
 
-`release/求职工作台 Setup 0.2.1-m2.exe`
+`release/求职工作台 Setup 1.0.0.exe`
 
 ## 本地数据
 
