@@ -1,12 +1,13 @@
 {
   "name": "job-workbench",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Local Windows job-search workbench",
   "author": "龚昌",
   "type": "module",
   "main": "./out/main/index.js",
   "scripts": {
+    "start": "electron-vite preview",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
@@ -42,6 +43,7 @@
     }
   },
   "dependencies": {
+    "playwright-core": "^1.65.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "zod": "^4.6.7"
@@ -51,7 +53,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.2.1",
-    "electron": "^45.2.3",
+    "electron": "45.2.3",
     "electron-builder": "^26.18.0",
     "electron-vite": "^6.0.0",
     "typescript": "^7.0.2",

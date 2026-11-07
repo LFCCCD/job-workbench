@@ -5,6 +5,17 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin()],
+    build: {
+      rollupOptions: {
+        input: {
+          index: path.resolve("src/main/index.ts"),
+          "collector-worker": path.resolve(
+            "src/main/collector-worker.ts",
+          ),
+          "ai-worker": path.resolve("src/main/ai-worker.ts"),
+        },
+      },
+    },
     resolve: {
       alias: {
         "@shared": path.resolve("src/shared"),

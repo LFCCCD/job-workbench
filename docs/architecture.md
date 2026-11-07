@@ -1,4 +1,4 @@
-# M1 Architecture Notes
+# Architecture Notes
 
 ## Scope
 
@@ -19,6 +19,51 @@ The first milestone proves the complete local desktop path:
 - Preload uses CommonJS because Electron sandboxed preload scripts do not support ESM.
 - Renderer has no Node integration and only receives the typed `jobWorkbench` API.
 - PDF rendering uses a hidden BrowserWindow and never loads remote resources.
+- Data-layer migration is transactional, checked with `PRAGMA integrity_check`, and preceded by
+  a safety backup.
+- `schema_migrations` records schema versions. The current schema version is 7.
+- Durable tasks are stored in SQLite with idempotency keys and interrupted-on-restart handling.
+- The task center executes registered task types in the main process, exposes progress and
+  errors through IPC, and supports cancel, retry, and finished-record cleanup.
+- Job filters are validated with shared Zod contracts and saved views are stored in SQLite.
+- Permanent deletion is restricted to jobs already in the recycle bin.
+- BOSS collection runs in an Electron `utilityProcess`; the worker never opens SQLite.
+- The worker connects to a dedicated Edge profile through local CDP and receives only typed
+  collection requests plus normalized cached search results.
+- The main process validates worker messages, stages candidates in SQLite, and is the only
+  process allowed to import candidates into the job table.
+- Collection stops on login failure, risk-control messages, CAPTCHA messages, or abnormal
+  responses. It never automates applications, messages, CAPTCHA, or rate-limit bypasses.
+- AI analysis runs in a second `utilityProcess`. The main process prepares a job/fact snapshot,
+  sends an ephemeral Provider credential to the worker, validates the result, and writes it to
+  SQLite.
+- AI results are cached by input hash, Provider, model, prompt version, and Schema version.
+- Every AI analysis is checked against exact JD quotes and a verified `factId` allowlist.
+- Remote AI credentials are encrypted with Electron `safeStorage`; they are never stored in
+  SQLite, task payloads, logs, or exported diagnostics.
+- Resume facts have an explicit verification state. AI input and default PDF versions include
+  verified facts only; unverified facts require an explicit opt-in on a version.
+- Resume versions store fact IDs rather than copied text, so updated facts are reflected in the
+  next PDF export. Deleting a fact transactionally removes its references from all versions.
+- Resume HTML and PDF rendering share one pure renderer with HTML escaping and a version-specific
+  fact selection.
+- CRM contacts, follow-ups, and interviews are separate normalized tables with cascading job
+  deletion. Every mutation writes a `job_events` timeline record.
+- The earliest pending follow-up is synchronized to `jobs.next_follow_up_at`; applying or
+  reaching communication states updates the relevant job timestamps.
+- CRM contact data is local-only and is excluded from AI snapshots and prompts.
+- The app uses a single-instance lock and a Windows tray. Closing the window hides it while
+  durable tasks and reminder checks continue.
+- Due follow-ups are deduplicated per task per day in `notification_deliveries`.
+- Health checks cover SQLite integrity, recent backups, Edge, AI configuration, tasks, and
+  reminders. Diagnostics are exported as redacted JSON.
+- Packaged Windows builds can opt into login startup through Electron login-item settings.
+- Update checks read the latest public GitHub Release, cache the result for six hours, and never
+  download or execute an installer automatically.
+- Code signing remains an external release requirement; the application reports the unsigned
+  state rather than creating an untrusted self-signed identity.
+- Daily app logs are retained for 14 days and never include contacts, resume content, cookies,
+  API keys, job descriptions, or recruitment chats.
 
 ## Database decision
 
@@ -28,9 +73,4 @@ to avoid native ABI rebuilds and installer packaging risk.
 
 ## Deferred work
 
-- BOSS Collector utility process
-- AI Provider and AI utility process
-- Durable task queue and recovery UI
-- Full CRM and interview records
-- Multi-version resume editor
 - Auto update and code signing

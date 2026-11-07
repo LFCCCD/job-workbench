@@ -5,25 +5,103 @@ import {
   BrowserWindow,
   dialog,
   ipcMain,
+  Menu,
   shell,
+  Tray,
 } from "electron";
 import { JobDatabase } from "./database";
+import { TaskService } from "./task-service";
+import { AiAnalysisService } from "./ai-service";
+import { AiSettingsService } from "./ai-settings";
 import {
+  CollectorBrowserService,
+  isBossSiteUrl,
+} from "./collector-browser";
+import { CollectorService } from "./collector-service";
+import { DetailBackfillService } from "./detail-backfill-service";
+import { renderResumeHtml } from "./resume-render";
+import { AppLogger } from "./app-logger";
+import { HealthService } from "./health-service";
+import { ReminderService } from "./reminder-service";
+import { createTrayImage } from "./tray-icon";
+import { AutoLaunchService } from "./auto-launch-service";
+import { UpdateService } from "./update-service";
+import { CityCatalogService } from "./city-catalog-service";
+import {
+  AccentThemeSchema,
+  AiAnalysisIdSchema,
+  AiAnalyzeRequestSchema,
+  AiSettingsInputSchema,
   ArchiveJobsSchema,
+  AutoLaunchSettingSchema,
+  CollectorCitiesSchema,
+  CollectorIdsSchema,
+  CollectorQueriesSchema,
+  CollectorRequestSchema,
+  CrmDeleteSchema,
+  CrmJobIdSchema,
+  DetailBackfillRequestSchema,
   JobStatusSchema,
   ListJobsSchema,
   ManualJobSchema,
+  NotificationSettingSchema,
+  PermanentDeleteSchema,
+  ResumeExportRequestSchema,
+  ResumeIdSchema,
+  ResumeProfileInputSchema,
+  ResumeVerifiedSchema,
+  SaveFollowUpSchema,
+  SaveInterviewSchema,
+  SaveJobContactSchema,
+  SaveResumeFactSchema,
+  SaveResumeVersionSchema,
+  SaveViewSchema,
+  SetFavoriteSchema,
+  SetFollowUpStatusSchema,
+  UpdateJobSchema,
   UpdateJobStatusSchema,
+  UpdateCheckSchema,
 } from "../shared/contracts";
+import type { MigrationPreview } from "../shared/contracts";
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const userDataRoot =
   process.env.JOB_WORKBENCH_USER_DATA ||
   path.join(process.env.LOCALAPPDATA || app.getPath("appData"), "JobHunter");
 app.setPath("userData", userDataRoot);
+const startedAt = Date.now();
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (process.platform === "win32") {
+  app.setAppUserModelId("cn.gongchang.jobworkbench");
+}
 
 let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
 let database: JobDatabase | null = null;
+let taskService: TaskService | null = null;
+let collectorBrowser: CollectorBrowserService | null = null;
+let aiSettings: AiSettingsService | null = null;
+let appLogger: AppLogger | null = null;
+let healthService: HealthService | null = null;
+let reminderService: ReminderService | null = null;
+let reminderTimer: NodeJS.Timeout | null = null;
+let updateTimer: NodeJS.Timeout | null = null;
+let autoLaunchService: AutoLaunchService | null = null;
+let updateService: UpdateService | null = null;
+let cityCatalogService: CityCatalogService | null = null;
+let isQuitting = false;
+let pendingMigration: MigrationPreview | null = null;
+
+const defaultCollectorCities = [
+  { name: "杭州", code: 101210100 },
+  { name: "宁波", code: 101210400 },
+  { name: "嘉兴", code: 101210300 },
+  { name: "丽水", code: 101210800 },
+];
+const defaultCollectorQueries = [
+  "软件实施工程师",
+  "技术支持工程师",
+];
 
 function getDatabase(): JobDatabase {
   if (!database) {
@@ -32,13 +110,184 @@ function getDatabase(): JobDatabase {
   return database;
 }
 
-function escapeHtml(value: unknown): string {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
+function getTaskService(): TaskService {
+  if (!taskService) {
+    const collector = new CollectorService(
+      getDatabase(),
+      path.join(currentDir, "collector-worker.js"),
+    );
+    const settings = getAiSettingsService();
+    const ai = new AiAnalysisService(
+      getDatabase(),
+      settings,
+      path.join(currentDir, "ai-worker.js"),
+    );
+    const detailBackfill = new DetailBackfillService(
+      path.join(currentDir, "collector-worker.js"),
+    );
+    taskService = new TaskService(
+      getDatabase(),
+      collector,
+      ai,
+      detailBackfill,
+    );
+  }
+  return taskService;
+}
+
+function getCollectorBrowser(): CollectorBrowserService {
+  collectorBrowser ||= new CollectorBrowserService(app.getPath("userData"));
+  return collectorBrowser;
+}
+
+function getCollectorCities() {
+  const stored = getDatabase().getAppSetting("collector.cities");
+  if (!stored) return defaultCollectorCities;
+  try {
+    const parsed = CollectorCitiesSchema.safeParse(JSON.parse(stored));
+    return parsed.success ? parsed.data : defaultCollectorCities;
+  } catch {
+    return defaultCollectorCities;
+  }
+}
+
+function getCollectorQueries() {
+  const stored = getDatabase().getAppSetting("collector.queries");
+  if (!stored) return defaultCollectorQueries;
+  try {
+    const parsed = CollectorQueriesSchema.safeParse(JSON.parse(stored));
+    return parsed.success ? parsed.data : defaultCollectorQueries;
+  } catch {
+    return defaultCollectorQueries;
+  }
+}
+
+function getCityCatalogService(): CityCatalogService {
+  cityCatalogService ||= new CityCatalogService(getDatabase());
+  return cityCatalogService;
+}
+
+function getAiSettingsService(): AiSettingsService {
+  aiSettings ||= new AiSettingsService(
+    getDatabase(),
+    app.getPath("userData"),
+  );
+  return aiSettings;
+}
+
+function getAppLogger(): AppLogger {
+  appLogger ||= new AppLogger(app.getPath("userData"));
+  return appLogger;
+}
+
+function getAutoLaunchService(): AutoLaunchService {
+  autoLaunchService ||= new AutoLaunchService();
+  return autoLaunchService;
+}
+
+function getUpdateService(): UpdateService {
+  updateService ||= new UpdateService(
+    getDatabase(),
+    app.getVersion(),
+    getAppLogger(),
+  );
+  return updateService;
+}
+
+function getHealthService(): HealthService {
+  healthService ||= new HealthService(
+    getDatabase(),
+    getCollectorBrowser(),
+    getAiSettingsService(),
+    getAppLogger(),
+    getAutoLaunchService(),
+    getUpdateService(),
+    app.getVersion(),
+    startedAt,
+    () => Boolean(tray),
+  );
+  return healthService;
+}
+
+function getReminderService(): ReminderService {
+  reminderService ||= new ReminderService(
+    getDatabase(),
+    getAppLogger(),
+    showMainWindow,
+  );
+  return reminderService;
+}
+
+function showMainWindow() {
+  if (!mainWindow) {
+    createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function updateTrayMenu() {
+  if (!tray || !database) return;
+  let openFollowUps = 0;
+  try {
+    openFollowUps = database.getCrmOverview().metrics.openFollowUps;
+  } catch {
+    openFollowUps = 0;
+  }
+  tray.setToolTip(
+    `求职工作台${openFollowUps ? ` · ${openFollowUps} 个跟进待处理` : ""}`,
+  );
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      {
+        label: "显示求职工作台",
+        click: showMainWindow,
+      },
+      {
+        label: `未完成跟进：${openFollowUps}`,
+        enabled: false,
+      },
+      {
+        label: "立即检查提醒",
+        click: () => {
+          getReminderService().check();
+          updateTrayMenu();
+        },
+      },
+      {
+        label: "打开数据目录",
+        click: () => void shell.openPath(getDatabase().dataDir),
+      },
+      { type: "separator" },
+      {
+        label: "退出求职工作台",
+        click: () => {
+          isQuitting = true;
+          app.quit();
+        },
+      },
+    ]),
+  );
+}
+
+function createTray() {
+  if (tray) return;
+  tray = new Tray(createTrayImage());
+  tray.setToolTip("求职工作台");
+  tray.on("click", showMainWindow);
+  tray.on("double-click", showMainWindow);
+  updateTrayMenu();
+}
+
+function safeFileName(value: string): string {
+  const cleaned = value
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
+    .replace(/[. ]+$/g, "")
+    .trim()
+    .slice(0, 120);
+  return cleaned || "求职简历";
 }
 
 function createWindow() {
@@ -59,8 +308,27 @@ function createWindow() {
   });
 
   mainWindow.once("ready-to-show", () => mainWindow?.show());
+  mainWindow.on("close", (event) => {
+    if (!isQuitting && tray) {
+      event.preventDefault();
+      mainWindow?.hide();
+      getAppLogger().log("info", "window.hidden_to_tray");
+    }
+  });
+  mainWindow.on("closed", () => {
+    mainWindow = null;
+  });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
+    if (isBossSiteUrl(url)) {
+      void getCollectorBrowser().openBossUrl(url).catch((error) => {
+        getAppLogger().log(
+          "warn",
+          `boss.open_in_dedicated_edge_failed ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    } else if (/^https?:\/\//i.test(url)) {
+      void shell.openExternal(url);
+    }
     return { action: "deny" };
   });
   mainWindow.webContents.on("will-navigate", (event, url) => {
@@ -78,15 +346,25 @@ function createWindow() {
 function registerIpc() {
   ipcMain.handle("workbench:dashboard", () => getDatabase().getDashboard());
   ipcMain.handle("workbench:list-jobs", (_event, input) => {
-    const { includeArchived } = ListJobsSchema.parse(input || {});
-    return getDatabase().listJobs(includeArchived);
+    return getDatabase().listJobs(ListJobsSchema.parse(input || {}));
+  });
+  ipcMain.handle("workbench:job-detail", (_event, id) => {
+    return getDatabase().getJobDetail(String(id));
   });
   ipcMain.handle("workbench:add-job", (_event, input) => {
     return getDatabase().addJob(ManualJobSchema.parse(input));
   });
+  ipcMain.handle("workbench:update-job", (_event, input) => {
+    const parsed = UpdateJobSchema.parse(input);
+    return getDatabase().updateJob(parsed.id, parsed.fields);
+  });
   ipcMain.handle("workbench:update-status", (_event, input) => {
     const { id, status } = UpdateJobStatusSchema.parse(input);
     return getDatabase().updateStatus(id, JobStatusSchema.parse(status));
+  });
+  ipcMain.handle("workbench:set-favorite", (_event, input) => {
+    const parsed = SetFavoriteSchema.parse(input);
+    return getDatabase().setFavorite(parsed.id, parsed.favorite);
   });
   ipcMain.handle("workbench:archive-jobs", (_event, input) => {
     const { ids } = ArchiveJobsSchema.parse(input);
@@ -98,10 +376,356 @@ function registerIpc() {
     const count = getDatabase().setArchived(ids, false);
     return { ok: true, message: `已恢复 ${count} 个岗位` };
   });
+  ipcMain.handle("workbench:delete-jobs-permanently", (_event, input) => {
+    const { ids } = PermanentDeleteSchema.parse(input);
+    const count = getDatabase().permanentlyDeleteJobs(ids);
+    return { ok: true, message: `已永久删除 ${count} 个岗位` };
+  });
+  ipcMain.handle("workbench:list-views", () => {
+    return getDatabase().listSavedViews();
+  });
+  ipcMain.handle("workbench:save-view", (_event, input) => {
+    const parsed = SaveViewSchema.parse(input);
+    return getDatabase().saveView(parsed.name, parsed.filters);
+  });
+  ipcMain.handle("workbench:delete-view", (_event, id) => {
+    const deleted = getDatabase().deleteSavedView(String(id));
+    return { ok: true, message: deleted ? "筛选视图已删除" : "筛选视图不存在" };
+  });
   ipcMain.handle("workbench:create-backup", async () => {
     return getDatabase().createBackup("manual");
   });
-  ipcMain.handle("workbench:migrate-database", async () => {
+  ipcMain.handle("workbench:list-tasks", () => {
+    return getTaskService().listTasks();
+  });
+  ipcMain.handle("workbench:create-backup-task", () => {
+    return getTaskService().enqueue("backup");
+  });
+  ipcMain.handle("workbench:create-collector-task", (_event, input) => {
+    const request = CollectorRequestSchema.parse(input);
+    return getTaskService().enqueue("collector", request);
+  });
+  ipcMain.handle("workbench:collector-cities", () => {
+    return getCollectorCities();
+  });
+  ipcMain.handle("workbench:collector-queries", () => {
+    return getCollectorQueries();
+  });
+  ipcMain.handle("workbench:save-collector-queries", (_event, input) => {
+    const queries = CollectorQueriesSchema.parse(input);
+    getDatabase().setAppSetting(
+      "collector.queries",
+      JSON.stringify(queries),
+    );
+    return queries;
+  });
+  ipcMain.handle("workbench:save-collector-cities", (_event, input) => {
+    const cities = CollectorCitiesSchema.parse(input);
+    getDatabase().setAppSetting(
+      "collector.cities",
+      JSON.stringify(cities),
+    );
+    return cities;
+  });
+  ipcMain.handle("workbench:boss-city-catalog", (_event, force) => {
+    return getCityCatalogService().get(Boolean(force));
+  });
+  ipcMain.handle("workbench:collector-status", () => {
+    return getCollectorBrowser().status();
+  });
+  ipcMain.handle("workbench:open-collector-browser", () => {
+    return getCollectorBrowser().open();
+  });
+  ipcMain.handle("workbench:collector-preview", () => {
+    return getDatabase().getCollectorPreview();
+  });
+  ipcMain.handle("workbench:import-collector-candidates", (_event, input) => {
+    const { ids } = CollectorIdsSchema.parse(input);
+    return getDatabase().importCollectorCandidates(ids);
+  });
+  ipcMain.handle("workbench:dismiss-collector-candidates", (_event, input) => {
+    const { ids } = CollectorIdsSchema.parse(input);
+    const count = getDatabase().dismissCollectorCandidates(ids);
+    return { ok: true, message: `已移除 ${count} 个候选岗位` };
+  });
+  ipcMain.handle("workbench:detail-backfill-preview", (_event, scope) => {
+    const parsedScope =
+      scope === "candidates" || scope === "jobs" ? scope : "all";
+    return getDatabase().getDetailBackfillPreview(parsedScope);
+  });
+  ipcMain.handle("workbench:create-detail-backfill-task", (_event, input) => {
+    const request = DetailBackfillRequestSchema.parse(input);
+    return getTaskService().enqueue("detail-backfill", request);
+  });
+  ipcMain.handle("workbench:ai-settings", () => {
+    return getAiSettingsService().getView();
+  });
+  ipcMain.handle("workbench:save-ai-settings", (_event, input) => {
+    return getAiSettingsService().save(AiSettingsInputSchema.parse(input));
+  });
+  ipcMain.handle("workbench:clear-ai-key", () => {
+    getAiSettingsService().clearApiKey();
+    return { ok: true, message: "AI API Key 已清除" };
+  });
+  ipcMain.handle("workbench:create-ai-analysis", (_event, input) => {
+    const request = AiAnalyzeRequestSchema.parse(input);
+    return getTaskService().enqueue("ai-analysis", request);
+  });
+  ipcMain.handle("workbench:job-ai-analysis", (_event, jobId) => {
+    return getDatabase().getLatestAiAnalysis(String(jobId));
+  });
+  ipcMain.handle("workbench:list-ai-analyses", (_event, limit) => {
+    return getDatabase().listAiAnalyses(
+      typeof limit === "number" ? limit : 30,
+    );
+  });
+  ipcMain.handle("workbench:ai-usage", async () => {
+    if (!database) {
+      return {
+        todayRemoteCalls: 0,
+        dailyLimit: 20,
+        totalAnalyses: 0,
+        cachedHits: 0,
+      };
+    }
+    const settings = await getAiSettingsService().getView();
+    return getDatabase().getAiUsage(settings.dailyRequestLimit);
+  });
+  ipcMain.handle("workbench:delete-ai-analysis", (_event, input) => {
+    const { id } = AiAnalysisIdSchema.parse(input);
+    const deleted = getDatabase().deleteAiAnalysis(id);
+    return {
+      ok: true,
+      message: deleted ? "分析记录已删除" : "分析记录不存在",
+    };
+  });
+  ipcMain.handle("workbench:resume-workspace", () => {
+    return getDatabase().getResumeWorkspace();
+  });
+  ipcMain.handle("workbench:save-resume-profile", (_event, input) => {
+    return getDatabase().saveResumeProfile(
+      ResumeProfileInputSchema.parse(input),
+    );
+  });
+  ipcMain.handle("workbench:save-resume-fact", (_event, input) => {
+    const id =
+      input && typeof input.id === "string" ? String(input.id) : null;
+    const parsed = SaveResumeFactSchema.parse({
+      ...(id ? { id } : {}),
+      fields: input?.fields,
+    });
+    return getDatabase().saveResumeFact(parsed.id || null, parsed.fields);
+  });
+  ipcMain.handle("workbench:set-resume-fact-verified", (_event, input) => {
+    const parsed = ResumeVerifiedSchema.parse(input);
+    return getDatabase().setResumeFactVerified(
+      parsed.id,
+      parsed.verified,
+    );
+  });
+  ipcMain.handle("workbench:delete-resume-fact", (_event, input) => {
+    const { id } = ResumeIdSchema.parse(input);
+    const deleted = getDatabase().deleteResumeFact(id);
+    return {
+      ok: true,
+      message: deleted ? "简历事实已删除" : "简历事实不存在",
+    };
+  });
+  ipcMain.handle("workbench:save-resume-version", (_event, input) => {
+    const id =
+      input && typeof input.id === "string" ? String(input.id) : null;
+    const parsed = SaveResumeVersionSchema.parse({
+      ...(id ? { id } : {}),
+      fields: input?.fields,
+    });
+    return getDatabase().saveResumeVersion(
+      parsed.id || null,
+      parsed.fields,
+    );
+  });
+  ipcMain.handle("workbench:delete-resume-version", (_event, input) => {
+    const { id } = ResumeIdSchema.parse(input);
+    const deleted = getDatabase().deleteResumeVersion(id);
+    return {
+      ok: true,
+      message: deleted ? "简历版本已删除" : "简历版本不存在",
+    };
+  });
+  ipcMain.handle("workbench:crm-overview", () => {
+    return getDatabase().getCrmOverview();
+  });
+  ipcMain.handle("workbench:crm-workspace", (_event, input) => {
+    const { jobId } = CrmJobIdSchema.parse(input);
+    return getDatabase().getCrmWorkspace(jobId);
+  });
+  ipcMain.handle("workbench:save-contact", (_event, input) => {
+    const { jobId } = CrmJobIdSchema.parse(input);
+    const id =
+      input && typeof input.id === "string" ? String(input.id) : null;
+    const parsed = SaveJobContactSchema.parse({
+      ...(id ? { id } : {}),
+      fields: input?.fields,
+    });
+    return getDatabase().saveJobContact(
+      jobId,
+      parsed.id || null,
+      parsed.fields,
+    );
+  });
+  ipcMain.handle("workbench:delete-contact", (_event, input) => {
+    const { id } = CrmDeleteSchema.parse(input);
+    const deleted = getDatabase().deleteJobContact(id);
+    return {
+      ok: true,
+      message: deleted ? "联系人已删除" : "联系人不存在",
+    };
+  });
+  ipcMain.handle("workbench:save-follow-up", (_event, input) => {
+    const { jobId } = CrmJobIdSchema.parse(input);
+    const id =
+      input && typeof input.id === "string" ? String(input.id) : null;
+    const parsed = SaveFollowUpSchema.parse({
+      ...(id ? { id } : {}),
+      fields: input?.fields,
+    });
+    const result = getDatabase().saveFollowUp(
+      jobId,
+      parsed.id || null,
+      parsed.fields,
+    );
+    updateTrayMenu();
+    return result;
+  });
+  ipcMain.handle("workbench:set-follow-up-status", (_event, input) => {
+    const parsed = SetFollowUpStatusSchema.parse(input);
+    const result = getDatabase().setFollowUpStatus(parsed.id, parsed.status);
+    updateTrayMenu();
+    return result;
+  });
+  ipcMain.handle("workbench:delete-follow-up", (_event, input) => {
+    const { id } = CrmDeleteSchema.parse(input);
+    const deleted = getDatabase().deleteFollowUp(id);
+    updateTrayMenu();
+    return {
+      ok: true,
+      message: deleted ? "跟进任务已删除" : "跟进任务不存在",
+    };
+  });
+  ipcMain.handle("workbench:save-interview", (_event, input) => {
+    const { jobId } = CrmJobIdSchema.parse(input);
+    const id =
+      input && typeof input.id === "string" ? String(input.id) : null;
+    const parsed = SaveInterviewSchema.parse({
+      ...(id ? { id } : {}),
+      fields: input?.fields,
+    });
+    return getDatabase().saveInterview(
+      jobId,
+      parsed.id || null,
+      parsed.fields,
+    );
+  });
+  ipcMain.handle("workbench:delete-interview", (_event, input) => {
+    const { id } = CrmDeleteSchema.parse(input);
+    const deleted = getDatabase().deleteInterview(id);
+    return {
+      ok: true,
+      message: deleted ? "面试记录已删除" : "面试记录不存在",
+    };
+  });
+  ipcMain.handle("workbench:system-health", () => {
+    return getHealthService().getStatus();
+  });
+  ipcMain.handle("workbench:set-notifications", (_event, input) => {
+    const { enabled } = NotificationSettingSchema.parse(input);
+    getDatabase().setAppSetting(
+      "notifications.enabled",
+      enabled ? "true" : "false",
+    );
+    updateTrayMenu();
+    return {
+      ok: true,
+      message: enabled ? "系统通知已开启" : "系统通知已关闭",
+    };
+  });
+  ipcMain.handle("workbench:run-reminder-check", () => {
+    const result = getReminderService().check();
+    updateTrayMenu();
+    return result;
+  });
+  ipcMain.handle("workbench:open-data-directory", async () => {
+    const target = getDatabase().dataDir;
+    const error = await shell.openPath(target);
+    return {
+      ok: !error,
+      message: error || `已打开数据目录：${target}`,
+    };
+  });
+  ipcMain.handle("workbench:export-diagnostics", async () => {
+    if (!mainWindow) return null;
+    const status = await getHealthService().getStatus();
+    const report = getHealthService().buildDiagnosticsReport(status);
+    const stamp = new Date()
+      .toISOString()
+      .replaceAll(":", "")
+      .replaceAll("-", "")
+      .slice(0, 15);
+    const save = await dialog.showSaveDialog(mainWindow, {
+      title: "保存脱敏诊断报告",
+      defaultPath: path.join(
+        app.getPath("documents"),
+        `求职工作台-诊断-${stamp}.json`,
+      ),
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (save.canceled || !save.filePath) return null;
+    const fs = await import("node:fs/promises");
+    await fs.writeFile(save.filePath, report, "utf8");
+    getAppLogger().log("info", "diagnostics.exported");
+    return save.filePath;
+  });
+  ipcMain.handle("workbench:set-auto-launch", (_event, input) => {
+    const { enabled } = AutoLaunchSettingSchema.parse(input);
+    getAutoLaunchService().setEnabled(enabled);
+    return {
+      ok: true,
+      message: enabled ? "Windows 登录自启已开启" : "Windows 登录自启已关闭",
+    };
+  });
+  ipcMain.handle("workbench:check-updates", (_event, input) => {
+    const { force } = UpdateCheckSchema.parse(input || {});
+    return getUpdateService().check(force);
+  });
+  ipcMain.handle("workbench:set-update-auto-check", (_event, input) => {
+    const { enabled } = NotificationSettingSchema.parse(input);
+    getUpdateService().setAutoCheck(enabled);
+    return {
+      ok: true,
+      message: enabled ? "自动检查更新已开启" : "自动检查更新已关闭",
+    };
+  });
+  ipcMain.handle("workbench:ui-preferences", () => {
+    const stored = getDatabase().getAppSetting("ui.accentTheme");
+    const parsed = AccentThemeSchema.safeParse(stored);
+    return {
+      accentTheme: parsed.success ? parsed.data : "teal",
+    };
+  });
+  ipcMain.handle("workbench:set-accent-theme", (_event, input) => {
+    const accentTheme = AccentThemeSchema.parse(input?.accentTheme);
+    getDatabase().setAppSetting("ui.accentTheme", accentTheme);
+    return { accentTheme };
+  });
+  ipcMain.handle("workbench:cancel-task", (_event, id) => {
+    return getTaskService().cancel(String(id));
+  });
+  ipcMain.handle("workbench:retry-task", (_event, id) => {
+    return getTaskService().retry(String(id));
+  });
+  ipcMain.handle("workbench:clear-finished-tasks", () => {
+    return getTaskService().clearFinished();
+  });
+  ipcMain.handle("workbench:inspect-legacy-database", async () => {
     if (!mainWindow) return null;
     const defaultDb = path.join(
       app.getPath("desktop"),
@@ -117,72 +741,136 @@ function registerIpc() {
       filters: [{ name: "SQLite Database", extensions: ["sqlite", "db"] }],
     });
     if (selection.canceled || !selection.filePaths[0]) return null;
-    return getDatabase().migrateLegacy(selection.filePaths[0]);
-  });
-  ipcMain.handle("workbench:export-resume", async () => {
-    if (!mainWindow) return null;
-    const { profile, facts } = getDatabase().getResumeDocumentData();
-    if (!profile) throw new Error("数据库中还没有个人资料");
-    const sections = facts
-      .map((fact) => {
-        const bullets = JSON.parse(String(fact.bullets_json || "[]")) as string[];
-        return `<section><h2>${escapeHtml(fact.kind)}</h2><h3>${escapeHtml(
-          fact.title,
-        )}</h3><p>${escapeHtml(fact.organization)} ${escapeHtml(
-          fact.role,
-        )}</p><ul>${bullets
-          .map((bullet) => `<li>${escapeHtml(bullet)}</li>`)
-          .join("")}</ul></section>`;
-      })
-      .join("");
-    const html = `<!doctype html><html><head><meta charset="utf-8"><style>
-      body{font-family:"Microsoft YaHei",sans-serif;color:#172a30;padding:44px;line-height:1.65}
-      h1{font-size:28px;margin:0 0 4px}h2{font-size:16px;border-bottom:1px solid #d8e4e3;padding-bottom:4px;margin-top:24px}
-      h3{font-size:15px;margin-bottom:2px}p{color:#53666c}ul{margin-top:5px}
-    </style></head><body><h1>${escapeHtml(
-      profile.full_name,
-    )}</h1><p>${escapeHtml(profile.phone)} · ${escapeHtml(
-      profile.email,
-    )} · ${escapeHtml(profile.current_city)}</p>${sections}</body></html>`;
-    const pdfWindow = new BrowserWindow({
-      show: false,
-      webPreferences: { sandbox: true },
-    });
-    await pdfWindow.loadURL(
-      `data:text/html;charset=utf-8,${encodeURIComponent(html)}`,
+    pendingMigration = getDatabase().inspectLegacyDatabase(
+      selection.filePaths[0],
     );
-    const pdf = await pdfWindow.webContents.printToPDF({
-      printBackground: true,
-      pageSize: "A4",
-    });
-    pdfWindow.destroy();
-
-    const save = await dialog.showSaveDialog(mainWindow, {
-      title: "保存简历 PDF",
-      defaultPath: path.join(app.getPath("documents"), "求职简历.pdf"),
-      filters: [{ name: "PDF", extensions: ["pdf"] }],
-    });
-    if (save.canceled || !save.filePath) return null;
-    const fs = await import("node:fs/promises");
-    await fs.writeFile(save.filePath, pdf);
-    return save.filePath;
+    return pendingMigration;
   });
+  ipcMain.handle("workbench:confirm-migration", async () => {
+    if (!pendingMigration) throw new Error("没有待确认的迁移任务");
+    const preview = pendingMigration;
+    pendingMigration = null;
+    return getDatabase().migrateLegacy(preview.sourcePath);
+  });
+  ipcMain.handle("workbench:restore-backup", async () => {
+    if (!mainWindow) return null;
+    const database = getDatabase();
+    const selection = await dialog.showOpenDialog(mainWindow, {
+      title: "选择要恢复的 SQLite 备份",
+      defaultPath: database.backupDir,
+      properties: ["openFile"],
+      filters: [{ name: "SQLite Backup", extensions: ["sqlite", "db"] }],
+    });
+    if (selection.canceled || !selection.filePaths[0]) return null;
+    const preview = database.inspectLegacyDatabase(selection.filePaths[0]);
+    const summary = Object.entries(preview.counts)
+      .map(([table, count]) => `${table}: ${count}`)
+      .join("\n");
+    const confirmation = await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      title: "恢复数据库",
+      message: "恢复会覆盖当前数据，但系统会先自动创建安全备份。",
+      detail: summary,
+      buttons: ["取消", "确认恢复"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    if (confirmation.response !== 1) return null;
+    return database.restoreBackup(preview.sourcePath);
+  });
+  ipcMain.handle(
+    "workbench:export-resume",
+    async (_event, rawInput?: unknown) => {
+      if (!mainWindow) return null;
+      const { versionId } = ResumeExportRequestSchema.parse(rawInput || {});
+      const { profile, facts, version } =
+        getDatabase().getResumeDocumentData(versionId);
+      if (!profile) throw new Error("数据库中还没有个人资料");
+      if (!profile.fullName.trim()) throw new Error("请先填写姓名");
+      if (!facts.length) throw new Error("当前简历版本没有可导出的事实");
+      const html = renderResumeHtml({ profile, facts, version });
+      const pdfWindow = new BrowserWindow({
+        show: false,
+        webPreferences: { sandbox: true },
+      });
+      let pdf: Buffer;
+      try {
+        await pdfWindow.loadURL(
+          `data:text/html;charset=utf-8,${encodeURIComponent(html)}`,
+        );
+        pdf = await pdfWindow.webContents.printToPDF({
+          printBackground: true,
+          pageSize: "A4",
+        });
+      } finally {
+        pdfWindow.destroy();
+      }
+
+      const save = await dialog.showSaveDialog(mainWindow, {
+        title: "保存简历 PDF",
+        defaultPath: path.join(
+          app.getPath("documents"),
+          `${safeFileName(version?.name || "求职简历")}.pdf`,
+        ),
+        filters: [{ name: "PDF", extensions: ["pdf"] }],
+      });
+      if (save.canceled || !save.filePath) return null;
+      const fs = await import("node:fs/promises");
+      await fs.writeFile(save.filePath, pdf);
+      return save.filePath;
+    },
+  );
 }
 
-app.whenReady().then(() => {
-  registerIpc();
-  createWindow();
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", showMainWindow);
+  app.whenReady().then(() => {
+    getAppLogger().log("info", `app.started version=${app.getVersion()}`);
+    registerIpc();
+    getTaskService().resumeQueuedTasks();
+    createTray();
+    createWindow();
+    const initialReminder = setTimeout(() => {
+      getReminderService().check();
+      updateTrayMenu();
+    }, 4_000);
+    initialReminder.unref();
+    reminderTimer = setInterval(() => {
+      getReminderService().check();
+      updateTrayMenu();
+    }, 5 * 60 * 1_000);
+    reminderTimer.unref();
+    updateTimer = setTimeout(() => {
+      if (getUpdateService().isAutoCheckEnabled()) {
+        void getUpdateService().check().catch(() => {
+          // The health page retains the last successful update result.
+        });
+      }
+    }, 6_000);
+    updateTimer.unref();
 
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    app.on("activate", showMainWindow);
   });
-});
 
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
-});
+  app.on("window-all-closed", () => {
+    if (!tray) app.quit();
+  });
 
-app.on("before-quit", () => {
-  database?.close();
-  database = null;
-});
+  app.on("before-quit", () => {
+    isQuitting = true;
+    if (reminderTimer) clearInterval(reminderTimer);
+    reminderTimer = null;
+    if (updateTimer) clearTimeout(updateTimer);
+    updateTimer = null;
+    tray?.destroy();
+    tray = null;
+    getAppLogger().log("info", "app.stopped");
+    taskService?.shutdown();
+    taskService = null;
+    database?.close();
+    database = null;
+  });
+}
