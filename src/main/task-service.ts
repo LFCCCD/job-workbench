@@ -2,9 +2,11 @@ import type { OperationResult, TaskRecord, TaskStatus } from "../shared/contract
 import {
   AiAnalyzeRequestSchema,
   CollectorRequestSchema,
+  DetailBackfillRequestSchema,
 } from "../shared/contracts";
 import type { AiAnalysisService } from "./ai-service";
 import type { CollectorService } from "./collector-service";
+import type { DetailBackfillService } from "./detail-backfill-service";
 import { JobDatabase } from "./database";
 
 type TaskHandlerContext = {
@@ -26,6 +28,7 @@ export class TaskService {
     private readonly database: JobDatabase,
     private readonly collector: CollectorService | null = null,
     private readonly ai: AiAnalysisService | null = null,
+    private readonly detailBackfill: DetailBackfillService | null = null,
   ) {
     this.handlers.set("backup", async () => {
       const path = await this.database.createBackup("scheduled");
@@ -53,6 +56,44 @@ export class TaskService {
       this.handlers.set("ai-analysis", async (payload, context) => {
         const request = AiAnalyzeRequestSchema.parse(payload);
         return this.ai!.analyzeJob(request.jobId, request.force, context);
+      });
+    }
+    if (this.detailBackfill) {
+      this.handlers.set("detail-backfill", async (payload, context) => {
+        const request = DetailBackfillRequestSchema.parse(payload);
+        const targets = this.database.getDetailBackfillTargets(
+          request.scope,
+          request.batchSize,
+        );
+        if (!targets.length) {
+          return {
+            targets: 0,
+            succeeded: 0,
+            failed: 0,
+            updatedCandidates: 0,
+            updatedJobs: 0,
+            warnings: [],
+          };
+        }
+        const result = await this.detailBackfill!.run(
+          targets,
+          request.requestDelayMs,
+          context,
+        );
+        const applied = this.database.applyDetailBackfillResults(
+          result.details,
+        );
+        const succeeded = result.details.filter(
+          (detail) => detail.success,
+        ).length;
+        return {
+          targets: targets.length,
+          succeeded,
+          failed: targets.length - succeeded,
+          updatedCandidates: applied.updatedCandidates,
+          updatedJobs: applied.updatedJobs,
+          warnings: result.warnings,
+        };
       });
     }
   }

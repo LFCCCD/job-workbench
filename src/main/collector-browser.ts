@@ -41,6 +41,19 @@ function findEdgeExecutable(): string {
   return executable;
 }
 
+export function isBossSiteUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      ["https:", "http:"].includes(url.protocol) &&
+      (url.hostname === "zhipin.com" ||
+        url.hostname.endsWith(".zhipin.com"))
+    );
+  } catch {
+    return false;
+  }
+}
+
 export class CollectorBrowserService {
   readonly profilePath: string;
 
@@ -70,25 +83,9 @@ export class CollectorBrowserService {
   async open(): Promise<CollectorStatus> {
     const current = await this.status();
     if (current.edgeRunning) return current;
-    const executable = findEdgeExecutable();
-    const child = spawn(
-      executable,
-      [
-        `--remote-debugging-port=9333`,
-        "--remote-debugging-address=127.0.0.1",
-        `--user-data-dir=${this.profilePath}`,
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-session-crashed-bubble",
-        `${bossCollectorConfig.origin}/web/user/?ka=header-login`,
-      ],
-      {
-        detached: true,
-        stdio: "ignore",
-        windowsHide: false,
-      },
+    await this.launchEdge(
+      `${bossCollectorConfig.origin}/web/user/?ka=header-login`,
     );
-    child.unref();
 
     for (let attempt = 0; attempt < 20; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 400));
@@ -98,5 +95,42 @@ export class CollectorBrowserService {
     throw new Error(
       "专用 Edge 已启动，但调试端口没有响应。请关闭该 Edge 窗口后重试",
     );
+  }
+
+  async openBossUrl(value: string): Promise<CollectorStatus> {
+    if (!isBossSiteUrl(value)) {
+      throw new Error("只允许使用专用 Edge 打开 BOSS 页面");
+    }
+    await this.launchEdge(new URL(value).toString());
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    return this.status();
+  }
+
+  private launchEdge(url: string): Promise<void> {
+    const executable = findEdgeExecutable();
+    return new Promise((resolve, reject) => {
+      const child = spawn(
+        executable,
+        [
+          "--remote-debugging-port=9333",
+          "--remote-debugging-address=127.0.0.1",
+          `--user-data-dir=${this.profilePath}`,
+          "--no-first-run",
+          "--no-default-browser-check",
+          "--disable-session-crashed-bubble",
+          url,
+        ],
+        {
+          detached: true,
+          stdio: "ignore",
+          windowsHide: false,
+        },
+      );
+      child.once("spawn", () => {
+        child.unref();
+        resolve();
+      });
+      child.once("error", reject);
+    });
   }
 }

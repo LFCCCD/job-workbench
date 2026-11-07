@@ -1,16 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
 import type {
+  AccentTheme,
   AiAnalysisRecord,
   AiProviderKind,
   AiSettingsView,
   AiUsageSummary,
   CollectorPreviewData,
   CollectorRequest,
+  CollectorCities,
+  BossCityCatalog,
   CollectorStatus,
   ContactFields,
   CrmOverview,
   CrmWorkspace,
   DashboardData,
+  DetailBackfillPreview,
+  DetailBackfillRequest,
   FollowUpFields,
   FollowUpRecord,
   FollowUpStatus,
@@ -67,6 +72,12 @@ const defaultCollectorRequest: CollectorRequest = {
   pagesPerQuery: 1,
   maxSearchRequests: 6,
   detailLimit: 12,
+  requestDelayMs: 4_500,
+};
+
+const defaultBackfillRequest: DetailBackfillRequest = {
+  scope: "all",
+  batchSize: 12,
   requestDelayMs: 4_500,
 };
 
@@ -251,6 +262,44 @@ const emptyInterview: InterviewFields = {
   nextStep: "",
 };
 
+const accentThemeOptions: Array<{
+  id: AccentTheme;
+  label: string;
+  description: string;
+  color: string;
+}> = [
+  {
+    id: "teal",
+    label: "青绿",
+    description: "默认，冷静清晰",
+    color: "#0b7779",
+  },
+  {
+    id: "blue",
+    label: "海蓝",
+    description: "沉稳，适合长时间浏览",
+    color: "#1a6fa8",
+  },
+  {
+    id: "violet",
+    label: "靛紫",
+    description: "专注，层次更鲜明",
+    color: "#7155a5",
+  },
+  {
+    id: "amber",
+    label: "琥珀",
+    description: "温暖，强调行动感",
+    color: "#a66d12",
+  },
+  {
+    id: "rose",
+    label: "玫红",
+    description: "柔和，侧重跟进提醒",
+    color: "#a84f6b",
+  },
+];
+
 const emptyEditForm: JobRecordUpdate = {
   title: "",
   company: "",
@@ -374,11 +423,27 @@ export function App() {
     fields: InterviewFields;
   } | null>(null);
   const [systemHealth, setSystemHealth] = useState<SystemHealth | null>(null);
+  const [accentTheme, setAccentTheme] = useState<AccentTheme>("teal");
   const [collectorRequest, setCollectorRequest] =
     useState<CollectorRequest>(defaultCollectorRequest);
-  const [collectorQueriesText, setCollectorQueriesText] = useState(
-    defaultCollectorRequest.queries.join("\n"),
+  const [collectorCityOptions, setCollectorCityOptions] =
+    useState<CollectorCities>(
+      collectorCities.map((city) => ({ ...city })),
+    );
+  const [showCityPicker, setShowCityPicker] = useState(false);
+  const [cityCatalog, setCityCatalog] = useState<BossCityCatalog | null>(
+    null,
   );
+  const [cityCatalogLoading, setCityCatalogLoading] = useState(false);
+  const [cityPickerTab, setCityPickerTab] = useState("hot");
+  const [cityPickerSearch, setCityPickerSearch] = useState("");
+  const [pendingCitySelection, setPendingCitySelection] =
+    useState<CollectorCities>([]);
+  const [newCollectorQuery, setNewCollectorQuery] = useState("");
+  const [backfillRequest, setBackfillRequest] =
+    useState<DetailBackfillRequest>(defaultBackfillRequest);
+  const [backfillPreview, setBackfillPreview] =
+    useState<DetailBackfillPreview | null>(null);
   const [selectedCandidates, setSelectedCandidates] = useState<Set<string>>(
     new Set(),
   );
@@ -403,12 +468,16 @@ export function App() {
       nextTasks,
       nextCollectorPreview,
       nextCollectorStatus,
+      nextBackfillPreview,
+      nextCollectorCities,
+      nextCollectorQueries,
       nextAiSettings,
       nextAiUsage,
       nextAiAnalyses,
       nextResumeWorkspace,
       nextAllActiveJobs,
       nextCrmOverview,
+      nextUiPreferences,
     ] = await Promise.all([
       window.jobWorkbench.getDashboard(),
       window.jobWorkbench.listJobs(nextFilters),
@@ -416,12 +485,16 @@ export function App() {
       window.jobWorkbench.listTasks(),
       window.jobWorkbench.listCollectorPreview(),
       window.jobWorkbench.getCollectorStatus(),
+      window.jobWorkbench.getDetailBackfillPreview(backfillRequest.scope),
+      window.jobWorkbench.getCollectorCities(),
+      window.jobWorkbench.getCollectorQueries(),
       window.jobWorkbench.getAiSettings(),
       window.jobWorkbench.getAiUsage(),
       window.jobWorkbench.listAiAnalyses(),
       window.jobWorkbench.getResumeWorkspace(),
       window.jobWorkbench.listJobs({ archived: "active" }),
       window.jobWorkbench.getCrmOverview(),
+      window.jobWorkbench.getUiPreferences(),
     ]);
     setDashboard(nextDashboard);
     setJobs(nextJobs);
@@ -429,12 +502,34 @@ export function App() {
     setTasks(nextTasks);
     setCollectorPreview(nextCollectorPreview);
     setCollectorStatus(nextCollectorStatus);
+    setBackfillPreview(nextBackfillPreview);
+    setCollectorCityOptions(nextCollectorCities);
+    setCollectorRequest((current) => ({
+      ...current,
+      queries: nextCollectorQueries,
+    }));
+    setCollectorRequest((current) => {
+      const availableCodes = new Set(
+        nextCollectorCities.map((city) => city.code),
+      );
+      const selected = current.cities.filter((city) =>
+        availableCodes.has(city.code),
+      );
+      return {
+        ...current,
+        cities:
+          selected.length > 0
+            ? selected
+            : nextCollectorCities.slice(0, Math.min(2, nextCollectorCities.length)),
+      };
+    });
     setAiSettings(nextAiSettings);
     setAiUsage(nextAiUsage);
     setAiAnalyses(nextAiAnalyses);
     setResumeWorkspace(nextResumeWorkspace);
     setAllActiveJobs(nextAllActiveJobs);
     setCrmOverview(nextCrmOverview);
+    setAccentTheme(nextUiPreferences.accentTheme);
     if (nextResumeWorkspace.profile) {
       setResumeProfileForm({
         fullName: nextResumeWorkspace.profile.fullName,
@@ -522,20 +617,32 @@ export function App() {
         window.jobWorkbench.listTasks(),
         window.jobWorkbench.getDashboard(),
         window.jobWorkbench.listCollectorPreview(),
+        window.jobWorkbench.getDetailBackfillPreview(backfillRequest.scope),
         window.jobWorkbench.listAiAnalyses(),
         window.jobWorkbench.getAiUsage(),
+        window.jobWorkbench.listJobs(filters),
       ]).then(([
         nextTasks,
         nextDashboard,
         nextCollectorPreview,
+        nextBackfillPreview,
         nextAiAnalyses,
         nextAiUsage,
+        nextJobs,
       ]) => {
         setTasks(nextTasks);
         setDashboard(nextDashboard);
         setCollectorPreview(nextCollectorPreview);
+        setBackfillPreview(nextBackfillPreview);
         setAiAnalyses(nextAiAnalyses);
         setAiUsage(nextAiUsage);
+        setJobs(nextJobs);
+        if (selectedJobId) {
+          void window.jobWorkbench
+            .getJobDetail(selectedJobId)
+            .then(setDetail)
+            .catch(() => undefined);
+        }
         if (selectedAiJobId) {
           void window.jobWorkbench
             .getJobAiAnalysis(selectedAiJobId)
@@ -544,7 +651,7 @@ export function App() {
       });
     }, 800);
     return () => window.clearInterval(timer);
-  }, [tasks, selectedAiJobId]);
+  }, [tasks, selectedAiJobId, selectedJobId, filters, backfillRequest.scope]);
 
   function showMessage(text: string) {
     setMessage(text);
@@ -725,11 +832,7 @@ export function App() {
   }
 
   async function startCollector() {
-    const queries = collectorQueriesText
-      .split(/\r?\n|,|，/)
-      .map((query) => query.trim())
-      .filter(Boolean);
-    if (!queries.length) {
+    if (!collectorRequest.queries.length) {
       showMessage("至少填写一个搜索关键词");
       return;
     }
@@ -740,22 +843,150 @@ export function App() {
     await runOperation(async () => {
       await window.jobWorkbench.createCollectorTask({
         ...collectorRequest,
-        queries,
       });
       setView("tasks");
       showMessage("采集任务已创建，完成后候选岗位会进入采集中心");
     });
   }
 
-  function toggleCollectorCity(code: number, checked: boolean) {
-    const city = collectorCities.find((item) => item.code === code);
-    if (!city) return;
-    setCollectorRequest((current) => ({
-      ...current,
-      cities: checked
-        ? [...current.cities.filter((item) => item.code !== code), city]
-        : current.cities.filter((item) => item.code !== code),
-    }));
+  async function addCollectorQuery() {
+    const query = newCollectorQuery.trim();
+    if (!query) return;
+    if (collectorRequest.queries.includes(query)) {
+      showMessage("这个搜索关键词已经存在");
+      return;
+    }
+    if (collectorRequest.queries.length >= 8) {
+      showMessage("最多保存 8 个搜索关键词");
+      return;
+    }
+    await runOperation(async () => {
+      const saved = await window.jobWorkbench.saveCollectorQueries([
+        ...collectorRequest.queries,
+        query,
+      ]);
+      setCollectorRequest((current) => ({
+        ...current,
+        queries: saved,
+      }));
+      setNewCollectorQuery("");
+      showMessage(`已添加搜索关键词：${query}`);
+    });
+  }
+
+  async function removeCollectorQuery(query: string) {
+    if (collectorRequest.queries.length <= 1) {
+      showMessage("至少保留一个搜索关键词");
+      return;
+    }
+    if (!window.confirm(`删除搜索关键词“${query}”？`)) return;
+    await runOperation(async () => {
+      const saved = await window.jobWorkbench.saveCollectorQueries(
+        collectorRequest.queries.filter((item) => item !== query),
+      );
+      setCollectorRequest((current) => ({
+        ...current,
+        queries: saved,
+      }));
+      showMessage(`已删除搜索关键词：${query}`);
+    });
+  }
+
+  async function startDetailBackfill() {
+    await runOperation(async () => {
+      await window.jobWorkbench.createDetailBackfillTask(backfillRequest);
+      setView("tasks");
+      showMessage("详情补全任务已创建");
+    });
+  }
+
+  function updateBackfillScope(scope: DetailBackfillRequest["scope"]) {
+    const next = { ...backfillRequest, scope };
+    setBackfillRequest(next);
+    void window.jobWorkbench
+      .getDetailBackfillPreview(scope)
+      .then(setBackfillPreview)
+      .catch((error) => showMessage(String(error)));
+  }
+
+  async function loadCityCatalog(force = false) {
+    setCityCatalogLoading(true);
+    try {
+      setCityCatalog(await window.jobWorkbench.getBossCityCatalog(force));
+    } catch (error) {
+      showMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCityCatalogLoading(false);
+    }
+  }
+
+  function openCityPicker() {
+    setPendingCitySelection([...collectorRequest.cities]);
+    setCityPickerSearch("");
+    setCityPickerTab("hot");
+    setShowCityPicker(true);
+    if (!cityCatalog) void loadCityCatalog(false);
+  }
+
+  function togglePendingCity(city: CollectorCities[number]) {
+    const isNationwide = city.code === 100010000;
+    const selected = pendingCitySelection.some(
+      (item) => item.code === city.code,
+    );
+    if (selected) {
+      setPendingCitySelection(
+        pendingCitySelection.filter((item) => item.code !== city.code),
+      );
+      return;
+    }
+    if (isNationwide) {
+      setPendingCitySelection([city]);
+      return;
+    }
+    const withoutNationwide = pendingCitySelection.filter(
+      (item) => item.code !== 100010000,
+    );
+    if (withoutNationwide.length >= 8) {
+      showMessage("每轮最多选择 8 个目标城市");
+      return;
+    }
+    setPendingCitySelection([...withoutNationwide, city]);
+  }
+
+  async function confirmCitySelection() {
+    if (!pendingCitySelection.length) {
+      showMessage("至少选择一个目标城市");
+      return;
+    }
+    await runOperation(async () => {
+      const saved = await window.jobWorkbench.saveCollectorCities(
+        pendingCitySelection,
+      );
+      setCollectorCityOptions(saved);
+      setCollectorRequest((current) => ({ ...current, cities: saved }));
+      setShowCityPicker(false);
+      showMessage(`已选择 ${saved.length} 个目标城市`);
+    });
+  }
+
+  async function removeCollectorCity(code: number) {
+    if (collectorCityOptions.length <= 1) {
+      showMessage("至少保留一个目标城市");
+      return;
+    }
+    const city = collectorCityOptions.find((item) => item.code === code);
+    if (!city || !window.confirm(`删除目标城市“${city.name}”？`)) return;
+    await runOperation(async () => {
+      const saved = await window.jobWorkbench.saveCollectorCities(
+        collectorCityOptions.filter((item) => item.code !== code),
+      );
+      setCollectorCityOptions(saved);
+      setCollectorRequest((current) => ({
+        ...current,
+        cities: current.cities.filter((item) => item.code !== code),
+      }));
+      showMessage(`已删除目标城市：${city.name}`);
+    });
   }
 
   function toggleCandidate(sourceKey: string) {
@@ -1264,6 +1495,24 @@ export function App() {
     });
   }
 
+  async function changeAccentTheme(theme: AccentTheme) {
+    const previous = accentTheme;
+    setAccentTheme(theme);
+    try {
+      const saved = await window.jobWorkbench.setAccentTheme(theme);
+      setAccentTheme(saved.accentTheme);
+      showMessage(
+        `配色已切换为 ${
+          accentThemeOptions.find((option) => option.id === saved.accentTheme)
+            ?.label || saved.accentTheme
+        }`,
+      );
+    } catch (error) {
+      setAccentTheme(previous);
+      showMessage(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async function cancelTask(id: string) {
     await runOperation(async () => {
       await window.jobWorkbench.cancelTask(id);
@@ -1301,6 +1550,14 @@ export function App() {
       task.type === "collector" &&
       (task.status === "queued" || task.status === "running"),
   );
+  const activeBackfillTask = tasks.find(
+    (task) =>
+      task.type === "detail-backfill" &&
+      (task.status === "queued" || task.status === "running"),
+  );
+  const lastBackfillTask = tasks.find(
+    (task) => task.type === "detail-backfill",
+  );
   const lastCollectorTask = tasks.find((task) => task.type === "collector");
   const selectedAiJob =
     aiSelectedJob ||
@@ -1332,9 +1589,38 @@ export function App() {
       (followUp) => followUp.status === "pending",
     ) || [];
   const copy = viewCopy[view];
+  const allCatalogCities =
+    cityCatalog?.groups.flatMap((group) => group.cities) || [];
+  const cityPickerGroups =
+    cityPickerSearch.trim()
+      ? [
+          {
+            firstChar: "搜索",
+            cities: allCatalogCities.filter((city) =>
+              city.name.includes(cityPickerSearch.trim()),
+            ),
+          },
+        ]
+      : cityPickerTab === "hot"
+        ? [
+            {
+              firstChar: "热门城市",
+              cities: cityCatalog?.hotCities || [],
+            },
+          ]
+        : (cityCatalog?.groups || []).filter((group) => {
+            const tabLetters: Record<string, string> = {
+              ABCDE: "ABCDE",
+              FGHJ: "FGHJ",
+              KLMN: "KLMN",
+              PQRST: "PQRST",
+              WXYZ: "WXYZ",
+            };
+            return tabLetters[cityPickerTab]?.includes(group.firstChar);
+          });
 
   return (
-    <div className="app">
+    <div className="app" data-theme={accentTheme}>
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">J</div>
@@ -1970,7 +2256,7 @@ export function App() {
                       </button>
                       {detail.job.link ? (
                         <a href={detail.job.link} target="_blank" rel="noreferrer">
-                          打开原岗位
+                          在专用 Edge 打开
                         </a>
                       ) : null}
                     </div>
@@ -2051,37 +2337,81 @@ export function App() {
             <div className="collector-form">
               <fieldset>
                 <legend>目标城市</legend>
-                <div className="city-options">
-                  {collectorCities.map((city) => (
-                    <label key={city.code}>
-                      <input
-                        type="checkbox"
-                        checked={collectorRequest.cities.some(
-                          (selectedCity) =>
-                            selectedCity.code === city.code,
-                        )}
-                        onChange={(event) =>
-                          toggleCollectorCity(
-                            city.code,
-                            event.target.checked,
-                          )
-                        }
-                      />
+                <div className="selected-city-list">
+                  {collectorRequest.cities.map((city) => (
+                    <span className="selected-city-chip" key={city.code}>
                       {city.name}
-                    </label>
+                      <button
+                        type="button"
+                        onClick={() => void removeCollectorCity(city.code)}
+                        aria-label={`移除目标城市 ${city.name}`}
+                        disabled={busy}
+                      >
+                        ×
+                      </button>
+                    </span>
                   ))}
+                  <button
+                    type="button"
+                    className="city-picker-trigger"
+                    onClick={openCityPicker}
+                    disabled={busy}
+                  >
+                    选择城市
+                  </button>
                 </div>
+                <p className="city-code-hint">
+                  按热门城市或首字母选择，城市目录与 BOSS 一致；每轮最多选择 8 个。
+                </p>
               </fieldset>
-              <label>
-                搜索关键词（每行一个）
-                <textarea
-                  rows={4}
-                  value={collectorQueriesText}
-                  onChange={(event) =>
-                    setCollectorQueriesText(event.target.value)
-                  }
-                />
-              </label>
+              <div className="keyword-editor">
+                <span>搜索关键词</span>
+                <div className="selected-keyword-list">
+                  {collectorRequest.queries.map((query) => (
+                    <span className="selected-keyword-chip" key={query}>
+                      {query}
+                      <button
+                        type="button"
+                        onClick={() => void removeCollectorQuery(query)}
+                        aria-label={`删除搜索关键词 ${query}`}
+                        disabled={busy}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                  <div className="keyword-add-row">
+                    <input
+                      value={newCollectorQuery}
+                      maxLength={100}
+                      placeholder="输入关键词后按 Enter"
+                      onChange={(event) =>
+                        setNewCollectorQuery(event.target.value)
+                      }
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void addCollectorQuery();
+                        }
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void addCollectorQuery()}
+                      disabled={
+                        busy ||
+                        !newCollectorQuery.trim() ||
+                        collectorRequest.queries.length >= 8
+                      }
+                    >
+                      添加
+                    </button>
+                  </div>
+                </div>
+                <p className="city-code-hint">
+                  最多 8 个关键词，点击气泡右侧 × 可删除。
+                </p>
+              </div>
               <div className="collector-number-grid">
                 <label>
                   每个条件页数
@@ -2188,6 +2518,140 @@ export function App() {
                 {String(lastCollectorTask.result.addedToPreview ?? 0)} 个。
               </div>
             ) : null}
+          </section>
+
+          <section className="panel backfill-panel">
+            <div className="collector-intro">
+              <div>
+                <p className="eyebrow">DETAIL BACKFILL</p>
+                <h2>批量补全缺失岗位详情</h2>
+                <p className="muted">
+                  为描述为空的候选岗位和正式岗位低频读取 BOSS 详情，任务可取消并支持分批继续。
+                </p>
+              </div>
+              <span className="status-badge">
+                待补全 {backfillPreview?.totalUniqueMissing ?? 0}
+              </span>
+            </div>
+            <div className="backfill-summary">
+              <div>
+                <span>候选岗位</span>
+                <strong>{backfillPreview?.candidatesMissing ?? 0}</strong>
+              </div>
+              <div>
+                <span>正式岗位</span>
+                <strong>{backfillPreview?.jobsMissing ?? 0}</strong>
+              </div>
+              <div>
+                <span>去重后待补全</span>
+                <strong>{backfillPreview?.totalUniqueMissing ?? 0}</strong>
+              </div>
+            </div>
+            <div className="backfill-form">
+              <label>
+                补全范围
+                <select
+                  value={backfillRequest.scope}
+                  onChange={(event) =>
+                    updateBackfillScope(
+                      event.target.value as DetailBackfillRequest["scope"],
+                    )
+                  }
+                >
+                  <option value="all">候选岗位 + 正式岗位</option>
+                  <option value="candidates">仅候选岗位</option>
+                  <option value="jobs">仅正式岗位</option>
+                </select>
+              </label>
+              <label>
+                每批岗位数
+                <input
+                  type="number"
+                  min={1}
+                  max={30}
+                  value={backfillRequest.batchSize}
+                  onChange={(event) =>
+                    setBackfillRequest({
+                      ...backfillRequest,
+                      batchSize: Number(event.target.value),
+                    })
+                  }
+                />
+              </label>
+              <label>
+                请求间隔（毫秒）
+                <input
+                  type="number"
+                  min={3500}
+                  max={15000}
+                  step={500}
+                  value={backfillRequest.requestDelayMs}
+                  onChange={(event) =>
+                    setBackfillRequest({
+                      ...backfillRequest,
+                      requestDelayMs: Number(event.target.value),
+                    })
+                  }
+                />
+              </label>
+              <button
+                className="primary"
+                onClick={() => void startDetailBackfill()}
+                disabled={
+                  busy ||
+                  Boolean(activeBackfillTask) ||
+                  !backfillPreview?.totalUniqueMissing
+                }
+              >
+                {activeBackfillTask ? "正在补全" : "开始补全一批"}
+              </button>
+            </div>
+            {activeBackfillTask ? (
+              <div className="active-collector-task">
+                <div>
+                  <strong>详情补全任务运行中</strong>
+                  <span>{activeBackfillTask.progress}%</span>
+                </div>
+                <div className="progress-line">
+                  <span
+                    style={{ width: `${activeBackfillTask.progress}%` }}
+                  />
+                </div>
+                <button
+                  className="danger"
+                  onClick={() => void cancelTask(activeBackfillTask.id)}
+                  disabled={busy}
+                >
+                  停止补全
+                </button>
+              </div>
+            ) : lastBackfillTask ? (
+              <div
+                className={`backfill-result ${
+                  lastBackfillTask.status === "failed" ? "failed" : ""
+                }`}
+              >
+                <strong>
+                  {lastBackfillTask.status === "succeeded"
+                    ? "最近一批补全完成"
+                    : "最近一批补全失败"}
+                </strong>
+                {lastBackfillTask.status === "succeeded" ? (
+                  <span>
+                    成功 {String(lastBackfillTask.result.succeeded ?? 0)} /{" "}
+                    {String(lastBackfillTask.result.targets ?? 0)}，更新职位{" "}
+                    {String(lastBackfillTask.result.updatedJobs ?? 0)} 个、候选{" "}
+                    {String(lastBackfillTask.result.updatedCandidates ?? 0)} 个
+                  </span>
+                ) : (
+                  <span>{lastBackfillTask.error}</span>
+                )}
+              </div>
+            ) : (
+              <p className="backfill-note">
+                建议每批 10～15 个、间隔至少 4500 毫秒。补全后再次点击可继续下一批。
+              </p>
+            )}
           </section>
 
           <section className="panel collector-preview">
@@ -2306,7 +2770,7 @@ export function App() {
                               target="_blank"
                               rel="noreferrer"
                             >
-                              打开 BOSS
+                              在专用 Edge 打开
                             </a>
                           ) : null}
                         </div>
@@ -3535,6 +3999,46 @@ export function App() {
         </section>
 
         <section hidden={view !== "settings"} className="settings-center">
+          <section className="panel settings-panel appearance-panel">
+            <div className="system-section-head">
+              <div>
+                <p className="eyebrow">APPEARANCE</p>
+                <h2>界面配色</h2>
+                <p className="muted">
+                  主色会应用到侧栏、按钮、强调文字、状态标记和进度条。
+                </p>
+              </div>
+              <span className="status-badge">
+                {
+                  accentThemeOptions.find(
+                    (option) => option.id === accentTheme,
+                  )?.label
+                }
+              </span>
+            </div>
+            <div className="theme-options">
+              {accentThemeOptions.map((option) => (
+                <button
+                  className={`theme-option ${
+                    accentTheme === option.id ? "active" : ""
+                  }`}
+                  key={option.id}
+                  onClick={() => void changeAccentTheme(option.id)}
+                  aria-pressed={accentTheme === option.id}
+                >
+                  <span
+                    className="theme-swatch"
+                    style={{ background: option.color }}
+                  />
+                  <span>
+                    <strong>{option.label}</strong>
+                    <small>{option.description}</small>
+                  </span>
+                </button>
+              ))}
+            </div>
+          </section>
+
           <section className="panel settings-panel">
             <div className="system-section-head">
               <div>
@@ -3859,6 +4363,8 @@ export function App() {
                             ? "数据库备份"
                             : task.type === "collector"
                               ? "BOSS 候选采集"
+                              : task.type === "detail-backfill"
+                                ? "岗位详情补全"
                               : task.type === "ai-analysis"
                                 ? "AI 单岗位分析"
                               : task.type}
@@ -3899,6 +4405,15 @@ export function App() {
                         抓取 {task.result.captured} 个岗位 · 新增预览{" "}
                         {String(task.result.addedToPreview ?? 0)} · 已有岗位{" "}
                         {String(task.result.existingInJobPool ?? 0)}
+                      </p>
+                    ) : null}
+                    {task.type === "detail-backfill" &&
+                    typeof task.result.targets === "number" ? (
+                      <p className="task-result">
+                        处理 {task.result.targets} 个 · 成功{" "}
+                        {String(task.result.succeeded ?? 0)} · 更新职位{" "}
+                        {String(task.result.updatedJobs ?? 0)} · 更新候选{" "}
+                        {String(task.result.updatedCandidates ?? 0)}
                       </p>
                     ) : null}
                     {task.type === "ai-analysis" &&
@@ -4487,6 +5002,128 @@ export function App() {
               </button>
             </div>
           </form>
+        </div>
+      ) : null}
+
+      {showCityPicker ? (
+        <div className="modal-backdrop">
+          <section className="modal city-picker-modal">
+            <div className="city-picker-head">
+              <div>
+                <p className="eyebrow">BOSS CITY SELECTOR</p>
+                <h2>请选择城市</h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCityPicker(false)}
+                aria-label="关闭城市选择"
+              >
+                ×
+              </button>
+            </div>
+            <div className="city-picker-toolbar">
+              <input
+                value={cityPickerSearch}
+                placeholder="搜索城市"
+                onChange={(event) =>
+                  setCityPickerSearch(event.target.value)
+                }
+              />
+              <button
+                type="button"
+                onClick={() => void loadCityCatalog(true)}
+                disabled={cityCatalogLoading}
+              >
+                {cityCatalogLoading ? "更新中" : "更新城市目录"}
+              </button>
+            </div>
+            <div className="city-picker-tabs">
+              {[
+                ["hot", "热门城市"],
+                ["ABCDE", "ABCDE"],
+                ["FGHJ", "FGHJ"],
+                ["KLMN", "KLMN"],
+                ["PQRST", "PQRST"],
+                ["WXYZ", "WXYZ"],
+              ].map(([id, label]) => (
+                <button
+                  type="button"
+                  className={cityPickerTab === id ? "active" : ""}
+                  key={id}
+                  onClick={() => {
+                    setCityPickerTab(id);
+                    setCityPickerSearch("");
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="city-picker-body">
+              {cityCatalogLoading ? (
+                <p className="muted">正在读取 BOSS 城市目录…</p>
+              ) : cityPickerGroups.some((group) => group.cities.length) ? (
+                cityPickerGroups.map((group) => (
+                  <section key={group.firstChar}>
+                    <h3>{group.firstChar}</h3>
+                    <div className="city-picker-grid">
+                      {group.cities.map((city) => {
+                        const selected = pendingCitySelection.some(
+                          (item) => item.code === city.code,
+                        );
+                        return (
+                          <button
+                            type="button"
+                            className={selected ? "selected" : ""}
+                            key={`${group.firstChar}-${city.code}`}
+                            onClick={() => togglePendingCity(city)}
+                          >
+                            {selected ? "✓ " : ""}
+                            {city.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </section>
+                ))
+              ) : (
+                <div className="empty city-picker-empty">
+                  <strong>没有匹配城市</strong>
+                  <p>检查搜索内容，或刷新城市目录。</p>
+                </div>
+              )}
+            </div>
+            <div className="city-picker-selection">
+              <strong>已选 {pendingCitySelection.length}/8</strong>
+              <div>
+                {pendingCitySelection.map((city) => (
+                  <button
+                    type="button"
+                    key={city.code}
+                    onClick={() => togglePendingCity(city)}
+                  >
+                    {city.name} ×
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="modal-actions">
+              <button
+                type="button"
+                onClick={() => setShowCityPicker(false)}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="primary"
+                onClick={() => void confirmCitySelection()}
+                disabled={busy || !pendingCitySelection.length}
+              >
+                确认选择
+              </button>
+            </div>
+          </section>
         </div>
       ) : null}
 

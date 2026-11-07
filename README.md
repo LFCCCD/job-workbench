@@ -16,8 +16,10 @@ Windows 本地求职管理工具。当前 `feat/m2-data-core` 分支已打通：
 - 任务中心：后台备份、进度、取消、重试和清理已完成记录
 - 独立 BOSS Collector Worker（Electron `utilityProcess`）
 - 专用 Edge 资料目录、人工扫码登录和本地 CDP 连接
+- 应用内所有 BOSS 岗位链接统一在专用 Edge 中打开，复用采集登录状态
 - 低频搜索、短期结果缓存、候选去重及风险即刻停止
 - 采集候选预览、批量忽略和人工确认后事务导入
+- 批量补全缺失岗位详情：候选与正式岗位分批读取 JD，支持取消和继续下一批
 - 采集岗位与已有岗位按 BOSS 来源 ID 去重，更新时保留状态、收藏和备注
 - 独立 AI Analysis Worker 和本地规则预分析
 - DeepSeek、DashScope、自定义 OpenAI 兼容 Provider

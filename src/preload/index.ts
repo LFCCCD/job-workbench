@@ -1,9 +1,13 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
+  AccentTheme,
   AiAnalyzeRequest,
   AiSettingsInput,
   CollectorRequest,
+  CollectorCities,
+  CollectorQueries,
   ContactFields,
+  DetailBackfillRequest,
   FollowUpFields,
   FollowUpStatus,
   InterviewFields,
@@ -53,6 +57,14 @@ const api: JobWorkbenchApi = {
     ipcRenderer.invoke("workbench:create-backup-task"),
   createCollectorTask: (request: CollectorRequest) =>
     ipcRenderer.invoke("workbench:create-collector-task", request),
+  getCollectorCities: () => ipcRenderer.invoke("workbench:collector-cities"),
+  saveCollectorCities: (cities: CollectorCities) =>
+    ipcRenderer.invoke("workbench:save-collector-cities", cities),
+  getBossCityCatalog: (force = false) =>
+    ipcRenderer.invoke("workbench:boss-city-catalog", force),
+  getCollectorQueries: () => ipcRenderer.invoke("workbench:collector-queries"),
+  saveCollectorQueries: (queries: CollectorQueries) =>
+    ipcRenderer.invoke("workbench:save-collector-queries", queries),
   getCollectorStatus: () => ipcRenderer.invoke("workbench:collector-status"),
   openCollectorBrowser: () =>
     ipcRenderer.invoke("workbench:open-collector-browser"),
@@ -62,6 +74,11 @@ const api: JobWorkbenchApi = {
     ipcRenderer.invoke("workbench:import-collector-candidates", { ids }),
   dismissCollectorCandidates: (ids: string[]) =>
     ipcRenderer.invoke("workbench:dismiss-collector-candidates", { ids }),
+  getDetailBackfillPreview: (
+    scope: DetailBackfillRequest["scope"] = "all",
+  ) => ipcRenderer.invoke("workbench:detail-backfill-preview", scope),
+  createDetailBackfillTask: (request: DetailBackfillRequest) =>
+    ipcRenderer.invoke("workbench:create-detail-backfill-task", request),
   getAiSettings: () => ipcRenderer.invoke("workbench:ai-settings"),
   saveAiSettings: (input: AiSettingsInput) =>
     ipcRenderer.invoke("workbench:save-ai-settings", input),
@@ -132,6 +149,9 @@ const api: JobWorkbenchApi = {
     ipcRenderer.invoke("workbench:check-updates", { force }),
   setUpdateAutoCheck: (enabled: boolean) =>
     ipcRenderer.invoke("workbench:set-update-auto-check", { enabled }),
+  getUiPreferences: () => ipcRenderer.invoke("workbench:ui-preferences"),
+  setAccentTheme: (accentTheme: AccentTheme) =>
+    ipcRenderer.invoke("workbench:set-accent-theme", { accentTheme }),
   cancelTask: (id: string) =>
     ipcRenderer.invoke("workbench:cancel-task", id),
   retryTask: (id: string) => ipcRenderer.invoke("workbench:retry-task", id),

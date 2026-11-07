@@ -9,6 +9,7 @@ import {
   AiAnalysisResultSchema,
   CollectorCacheEntrySchema,
   CollectorCandidateSchema,
+  DetailBackfillTargetSchema,
   ListJobsSchema,
   ResumeProfileInputSchema,
   SaveFollowUpSchema,
@@ -35,6 +36,8 @@ import type {
   CrmOverview,
   CrmWorkspace,
   DashboardData,
+  DetailBackfillPreview,
+  DetailBackfillTarget,
   DueFollowUpReminder,
   FollowUpFields,
   FollowUpRecord,
@@ -666,6 +669,273 @@ export class JobDatabase {
         existingInJobs,
       },
     };
+  }
+
+  getDetailBackfillPreview(
+    scope: "all" | "candidates" | "jobs" = "all",
+  ): DetailBackfillPreview {
+    const candidatesMissing =
+      scope === "jobs"
+        ? 0
+        : Number(
+            (
+              this.db
+                .prepare(`
+                  SELECT COUNT(*) AS count FROM collector_candidates
+                  WHERE state = 'pending'
+                    AND TRIM(description) = ''
+                    AND TRIM(link) <> ''
+                `)
+                .get() as SqlRow
+            ).count || 0,
+          );
+    const jobsMissing =
+      scope === "candidates"
+        ? 0
+        : Number(
+            (
+              this.db
+                .prepare(`
+                  SELECT COUNT(*) AS count FROM jobs
+                  WHERE archived_at IS NULL
+                    AND TRIM(description) = ''
+                    AND TRIM(link) <> ''
+                `)
+                .get() as SqlRow
+            ).count || 0,
+          );
+    const duplicateJobs = Number(
+      (
+        this.db
+          .prepare(`
+            SELECT COUNT(*) AS count
+            FROM jobs AS job
+            WHERE job.archived_at IS NULL
+              AND TRIM(job.description) = ''
+              AND TRIM(job.link) <> ''
+              AND job.source_key IS NOT NULL
+              AND EXISTS (
+                SELECT 1 FROM collector_candidates AS candidate
+                WHERE candidate.state = 'pending'
+                  AND candidate.source_key = job.source_key
+                  AND TRIM(candidate.description) = ''
+              )
+          `)
+          .get() as SqlRow
+      ).count || 0,
+    );
+    return {
+      candidatesMissing,
+      jobsMissing,
+      totalUniqueMissing:
+        scope === "candidates"
+          ? candidatesMissing
+          : scope === "jobs"
+            ? jobsMissing
+            : candidatesMissing + jobsMissing - duplicateJobs,
+    };
+  }
+
+  getDetailBackfillTargets(
+    scope: "all" | "candidates" | "jobs",
+    limit: number,
+  ): DetailBackfillTarget[] {
+    const safeLimit = Math.max(1, Math.min(30, Math.trunc(limit)));
+    const targets: DetailBackfillTarget[] = [];
+    const candidateSourceKeys = new Set<string>();
+    if (scope !== "jobs") {
+      const rows = this.db
+        .prepare(`
+          SELECT candidate.*, job.id AS linked_job_id
+          FROM collector_candidates AS candidate
+          LEFT JOIN jobs AS job
+            ON job.source_key = candidate.source_key
+           AND job.archived_at IS NULL
+          WHERE candidate.state = 'pending'
+            AND TRIM(candidate.description) = ''
+            AND TRIM(candidate.link) <> ''
+          ORDER BY candidate.score DESC, candidate.updated_at DESC
+          LIMIT ?
+        `)
+        .all(safeLimit) as SqlRow[];
+      for (const row of rows) {
+        const candidate = this.rowToCollectorCandidate(row);
+        candidateSourceKeys.add(candidate.sourceKey);
+        targets.push(
+          DetailBackfillTargetSchema.parse({
+            targetKey: `candidate:${candidate.sourceKey}`,
+            candidateSourceKey: candidate.sourceKey,
+            jobId: row.linked_job_id ? String(row.linked_job_id) : null,
+            candidate,
+          }),
+        );
+      }
+    }
+    if (scope !== "candidates" && targets.length < safeLimit) {
+      const rows = this.db
+        .prepare(`
+          SELECT * FROM jobs
+          WHERE archived_at IS NULL
+            AND TRIM(description) = ''
+            AND TRIM(link) <> ''
+          ORDER BY updated_at DESC
+          LIMIT ?
+        `)
+        .all(Math.min(500, safeLimit + candidateSourceKeys.size + 20)) as SqlRow[];
+      for (const row of rows) {
+        if (targets.length >= safeLimit) break;
+        const sourceKey = row.source_key
+          ? String(row.source_key)
+          : `job:${String(row.id)}`;
+        if (candidateSourceKeys.has(sourceKey)) continue;
+        const candidate = CollectorCandidateSchema.parse({
+          sourceKey,
+          title: String(row.title || ""),
+          company: String(row.company || ""),
+          salary: String(row.salary || ""),
+          city: String(row.city || ""),
+          district: String(row.district || ""),
+          experience: String(row.experience || ""),
+          degree: String(row.degree || ""),
+          industry: String(row.industry || ""),
+          companyScale: String(row.company_scale || ""),
+          skills: JSON.parse(String(row.skills_json || "[]")),
+          category: String(row.category || ""),
+          score: Number(row.score || 0),
+          reason: String(row.reason || ""),
+          risks: JSON.parse(String(row.risks_json || "[]")),
+          description: String(row.description || ""),
+          greeting: String(row.greeting || ""),
+          link: String(row.link || ""),
+          sourceQueries: JSON.parse(
+            String(row.source_queries_json || "[]"),
+          ),
+          collectedAt: String(row.last_seen_at || row.updated_at),
+        });
+        targets.push(
+          DetailBackfillTargetSchema.parse({
+            targetKey: `job:${String(row.id)}`,
+            candidateSourceKey: null,
+            jobId: String(row.id),
+            candidate,
+          }),
+        );
+      }
+    }
+    return targets;
+  }
+
+  applyDetailBackfillResults(
+    details: Array<{
+      targetKey: string;
+      candidateSourceKey: string | null;
+      jobId: string | null;
+      success: boolean;
+      candidate: CollectorCandidate | null;
+    }>,
+  ): { updatedCandidates: number; updatedJobs: number } {
+    let updatedCandidates = 0;
+    let updatedJobs = 0;
+    const timestamp = new Date().toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const detail of details) {
+        if (!detail.success || !detail.candidate) continue;
+        const candidate = CollectorCandidateSchema.parse(detail.candidate);
+        if (candidate.description.trim() === "") continue;
+        if (detail.candidateSourceKey) {
+          const result = this.db
+            .prepare(`
+              UPDATE collector_candidates SET
+                title = ?, company = ?, salary = ?, city = ?, district = ?,
+                experience = ?, degree = ?, industry = ?, company_scale = ?,
+                skills_json = ?, category = ?, score = ?, reason = ?,
+                risks_json = ?, description = ?, greeting = ?, link = ?,
+                collected_at = ?, updated_at = ?
+              WHERE source_key = ? AND state = 'pending'
+            `)
+            .run(
+              candidate.title,
+              candidate.company,
+              candidate.salary,
+              candidate.city,
+              candidate.district,
+              candidate.experience,
+              candidate.degree,
+              candidate.industry,
+              candidate.companyScale,
+              JSON.stringify(candidate.skills),
+              candidate.category,
+              candidate.score,
+              candidate.reason,
+              JSON.stringify(candidate.risks),
+              candidate.description,
+              candidate.greeting,
+              candidate.link,
+              candidate.collectedAt,
+              timestamp,
+              detail.candidateSourceKey,
+            );
+          updatedCandidates += Number(result.changes);
+          this.db
+            .prepare(
+              `DELETE FROM collector_cache
+               WHERE instr(candidates_json, ?) > 0`,
+            )
+            .run(`\"sourceKey\":\"${detail.candidateSourceKey}\"`);
+        }
+        if (detail.jobId) {
+          const result = this.db
+            .prepare(`
+              UPDATE jobs SET
+                title = ?, company = ?, salary = ?, city = ?, district = ?,
+                experience = ?, degree = ?, industry = ?, company_scale = ?,
+                skills_json = ?, category = ?, score = ?, grade = ?,
+                reason = ?, risks_json = ?, description = ?, greeting = ?,
+                link = ?, last_seen_at = ?, updated_at = ?
+              WHERE id = ?
+            `)
+            .run(
+              candidate.title,
+              candidate.company,
+              candidate.salary,
+              candidate.city,
+              candidate.district,
+              candidate.experience,
+              candidate.degree,
+              candidate.industry,
+              candidate.companyScale,
+              JSON.stringify(candidate.skills),
+              candidate.category,
+              candidate.score,
+              this.gradeForScore(candidate.score),
+              candidate.reason,
+              JSON.stringify(candidate.risks),
+              candidate.description,
+              candidate.greeting,
+              candidate.link,
+              candidate.collectedAt,
+              timestamp,
+              detail.jobId,
+            );
+          const changes = Number(result.changes);
+          updatedJobs += changes;
+          if (changes) {
+            this.insertCrmEvent(
+              detail.jobId,
+              "job_detail_backfill",
+              "从 BOSS 补全岗位详情",
+              timestamp,
+            );
+          }
+        }
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return { updatedCandidates, updatedJobs };
   }
 
   stageCollectorCandidates(

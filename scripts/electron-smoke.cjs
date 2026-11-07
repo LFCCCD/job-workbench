@@ -67,6 +67,30 @@ async function main() {
     unknowns: ["工作方式待确认"],
   };
   const aiServer = http.createServer((request, response) => {
+    if (request.url === "/cities") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          code: 0,
+          zpData: {
+            cityGroup: [
+              {
+                firstChar: "H",
+                cityList: [
+                  { name: "杭州", code: 101210100 },
+                  { name: "湖州", code: 101210500 },
+                  { name: "嘉兴", code: 101210300 },
+                  { name: "丽水", code: 101210800 },
+                  { name: "宁波", code: 101210400 },
+                  { name: "温州", code: 101210700 },
+                ],
+              },
+            ],
+          },
+        }),
+      );
+      return;
+    }
     if (request.url === "/update") {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(
@@ -137,6 +161,7 @@ async function main() {
       JOB_WORKBENCH_USER_DATA: userData,
       JOB_WORKBENCH_DISABLE_NOTIFICATIONS: "1",
       JOB_WORKBENCH_UPDATE_API: updateApiUrl,
+      JOB_WORKBENCH_CITY_API: `http://127.0.0.1:${aiAddress.port}/cities`,
     },
   });
   app.process().stderr?.on("data", (chunk) => {
@@ -154,31 +179,69 @@ async function main() {
     await page.waitForSelector("text=职位池");
     await page.locator("nav").getByRole("button", { name: /采集中心/ }).click();
     await page.waitForSelector("text=采集条件");
+    await page.waitForSelector("text=批量补全缺失岗位详情");
+    await page.getByRole("button", { name: "选择城市" }).click();
+    await page.waitForSelector("text=BOSS CITY SELECTOR");
+    await page
+      .locator(".city-picker-tabs")
+      .getByRole("button", { name: "FGHJ" })
+      .click();
+    await page.screenshot({
+      path: path.join(__dirname, "..", "artifacts", "smoke-city-picker.png"),
+      fullPage: false,
+    });
+    await page
+      .locator(".city-picker-grid button")
+      .filter({ hasText: "温州" })
+      .click();
+    await page.getByRole("button", { name: "确认选择" }).click();
+    await page.waitForSelector(".selected-city-chip:has-text('温州')");
+    const customCities = await page.evaluate(() =>
+      window.jobWorkbench.getCollectorCities(),
+    );
+    if (!customCities.some((city) => city.name === "温州" && city.code === 101210700)) {
+      throw new Error("Custom collector city was not persisted");
+    }
+    await page
+      .getByPlaceholder("输入关键词后按 Enter")
+      .fill("ERP实施顾问");
+    await page.getByRole("button", { name: "添加", exact: true }).click();
+    await page.waitForSelector(
+      ".selected-keyword-chip:has-text('ERP实施顾问')",
+    );
+    const customQueries = await page.evaluate(() =>
+      window.jobWorkbench.getCollectorQueries(),
+    );
+    if (!customQueries.includes("ERP实施顾问")) {
+      throw new Error("Custom collector query was not persisted");
+    }
     const collectorStatus = await page.evaluate(() =>
       window.jobWorkbench.getCollectorStatus(),
     );
     if (!collectorStatus || typeof collectorStatus.edgeRunning !== "boolean") {
       throw new Error("Collector status IPC did not return a valid response");
     }
-    await page.getByRole("button", { name: "开始采集" }).click();
-    await page.waitForSelector(".task-card");
-    await page.waitForFunction(
-      () =>
-        document.querySelector(".task-status")?.textContent?.includes("失败"),
-      null,
-      { timeout: 20_000 },
-    );
-    const collectorTaskError = await page
-      .locator(".task-error")
-      .first()
-      .textContent();
-    if (!collectorTaskError?.includes("专用 Edge")) {
-      throw new Error(
-        `Collector Worker failure was not actionable: ${collectorTaskError}`,
+    if (!collectorStatus.edgeRunning) {
+      await page.getByRole("button", { name: "开始采集" }).click();
+      await page.waitForSelector(".task-card");
+      await page.waitForFunction(
+        () =>
+          document.querySelector(".task-status")?.textContent?.includes("失败"),
+        null,
+        { timeout: 20_000 },
       );
+      const collectorTaskError = await page
+        .locator(".task-error")
+        .first()
+        .textContent();
+      if (!collectorTaskError?.includes("专用 Edge")) {
+        throw new Error(
+          `Collector Worker failure was not actionable: ${collectorTaskError}`,
+        );
+      }
+      await page.locator("nav").getByRole("button", { name: /采集中心/ }).click();
+      await page.waitForSelector("text=最近一次采集失败");
     }
-    await page.locator("nav").getByRole("button", { name: /采集中心/ }).click();
-    await page.waitForSelector("text=最近一次采集失败");
     await page.screenshot({
       path: path.join(__dirname, "..", "artifacts", "smoke-collector.png"),
       fullPage: true,
@@ -338,20 +401,41 @@ async function main() {
       .getByRole("button", { name: "导出诊断报告" })
       .click();
     for (let attempt = 0; attempt < 50; attempt += 1) {
-      if (fs.existsSync(diagnosticsPath)) break;
+      if (
+        fs.existsSync(diagnosticsPath) &&
+        fs.statSync(diagnosticsPath).size > 500
+      ) {
+        break;
+      }
       await page.waitForTimeout(100);
     }
     if (!fs.existsSync(diagnosticsPath)) {
       throw new Error("Diagnostics report was not created");
     }
-    const diagnostics = fs.readFileSync(diagnosticsPath, "utf8");
+    let diagnostics = "";
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      diagnostics = fs.readFileSync(diagnosticsPath, "utf8");
+      try {
+        JSON.parse(diagnostics);
+        break;
+      } catch {
+        await page.waitForTimeout(100);
+      }
+    }
     if (
       !diagnostics.includes("<DATA_DIR>") ||
       diagnostics.includes("招聘老师") ||
       diagnostics.includes("电力设备采购平台") ||
       diagnostics.includes("smoke-remote-key")
     ) {
-      throw new Error("Diagnostics report was not safely redacted");
+      throw new Error(
+        `Diagnostics report was not safely redacted: ${JSON.stringify({
+          hasDataDir: diagnostics.includes("<DATA_DIR>"),
+          hasContact: diagnostics.includes("招聘老师"),
+          hasResume: diagnostics.includes("电力设备采购平台"),
+          hasKey: diagnostics.includes("smoke-remote-key"),
+        })}`,
+      );
     }
     const sidebarBox = await page.locator(".sidebar").boundingBox();
     const gearBox = await page.locator(".settings-gear").boundingBox();
@@ -365,6 +449,21 @@ async function main() {
     }
     await page.locator(".settings-gear").click();
     await page.waitForSelector("text=APPLICATION SETTINGS");
+    await page
+      .locator(".theme-option")
+      .filter({ hasText: "海蓝" })
+      .click();
+    await page.waitForFunction(
+      () => document.querySelector(".app")?.getAttribute("data-theme") === "blue",
+    );
+    const uiPreferences = await page.evaluate(() =>
+      window.jobWorkbench.getUiPreferences(),
+    );
+    if (uiPreferences.accentTheme !== "blue") {
+      throw new Error(
+        `Theme preference was not persisted: ${JSON.stringify(uiPreferences)}`,
+      );
+    }
     await page
       .locator(".system-updates")
       .getByRole("button", { name: "检查更新" })
@@ -641,15 +740,15 @@ async function main() {
     await page.locator(".job-select").check();
     await page.getByRole("button", { name: "归档选中" }).click();
     await page.waitForSelector("text=还没有岗位");
-    await page.getByLabel("范围").selectOption("archived");
+    await page.locator(".filter-grid select").nth(2).selectOption("archived");
     await page.waitForSelector("text=软件实施工程师");
     await page.locator(".job-select").check();
     await page.getByRole("button", { name: "恢复选中" }).click();
-    await page.getByLabel("范围").selectOption("active");
+    await page.locator(".filter-grid select").nth(2).selectOption("active");
     await page.waitForSelector("text=软件实施工程师");
     await page.locator(".job-select").check();
     await page.getByRole("button", { name: "归档选中" }).click();
-    await page.getByLabel("范围").selectOption("archived");
+    await page.locator(".filter-grid select").nth(2).selectOption("archived");
     await page.waitForSelector("text=软件实施工程师");
     await page.locator(".job-select").check();
     page.once("dialog", (dialog) => dialog.accept());

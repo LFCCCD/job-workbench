@@ -5,6 +5,7 @@ import type {
   CollectorCacheEntry,
   CollectorCandidate,
   CollectorRequest,
+  DetailBackfillTarget,
 } from "../shared/contracts";
 
 type JsonRecord = Record<string, unknown>;
@@ -348,7 +349,7 @@ async function bodyText(page: Page): Promise<string> {
 
 async function captureBossHeaders(
   page: Page,
-  request: CollectorRequest,
+  query: string,
   progress: CollectorProgress,
 ): Promise<Record<string, string>> {
   let capturedHeaders: Record<string, string> | null = null;
@@ -394,7 +395,7 @@ async function captureBossHeaders(
       );
     }
     progress(15, "请在专用 Edge 中完成登录，等待系统读取当前搜索条件");
-    await searchInput.fill(request.queries[0]);
+    await searchInput.fill(query);
     await searchInput.press("Enter");
     for (let attempt = 0; attempt < 24 && !capturedHeaders; attempt += 1) {
       await page.waitForTimeout(500);
@@ -539,7 +540,11 @@ export async function collectBossCandidates(input: {
     (await browser.contexts()[0]?.newPage());
   if (!page) throw new BossStopError("专用 Edge 中没有可用页面");
     await page.bringToFront();
-    const headers = await captureBossHeaders(page, request, progress);
+    const headers = await captureBossHeaders(
+      page,
+      request.queries[0],
+      progress,
+    );
     const cached = new Map(cache.map((entry) => [entry.key, entry]));
     const cacheEntries: CollectorCacheEntry[] = [];
     const candidates = new Map<string, CollectorCandidate>();
@@ -674,6 +679,138 @@ export async function collectBossCandidates(input: {
       .sort((left, right) => right.score - left.score);
     progress(94, `采集完成，共 ${finalized.length} 个候选岗位`);
   return { candidates: finalized, cacheEntries, warnings };
+}
+
+export async function collectBossDetailBackfill(input: {
+  targets: DetailBackfillTarget[];
+  requestDelayMs: number;
+  signal: AbortSignal;
+  progress: CollectorProgress;
+}): Promise<{
+  details: Array<{
+    targetKey: string;
+    candidateSourceKey: string | null;
+    jobId: string | null;
+    success: boolean;
+    candidate: CollectorCandidate | null;
+    error: string;
+  }>;
+  warnings: string[];
+}> {
+  const { targets, requestDelayMs, signal, progress } = input;
+  progress(5, "正在连接专用 Edge");
+  let browser: Browser;
+  try {
+    browser = await chromium.connectOverCDP(BOSS_ENDPOINT, {
+      timeout: 15_000,
+    });
+  } catch {
+    throw new BossStopError(
+      "未连接到专用 Edge。请先在采集中心启动专用 Edge 并完成登录。",
+    );
+  }
+  const pages = browser.contexts().flatMap((context) => context.pages());
+  const page =
+    pages.find((candidate) => candidate.url().includes("zhipin.com")) ||
+    pages[0] ||
+    (await browser.contexts()[0]?.newPage());
+  if (!page) throw new BossStopError("专用 Edge 中没有可用页面");
+  await page.bringToFront();
+  const headers = await captureBossHeaders(
+    page,
+    targets[0]?.candidate.title || "软件实施工程师",
+    progress,
+  );
+  const details: Array<{
+    targetKey: string;
+    candidateSourceKey: string | null;
+    jobId: string | null;
+    success: boolean;
+    candidate: CollectorCandidate | null;
+    error: string;
+  }> = [];
+  const warnings: string[] = [];
+
+  for (let index = 0; index < targets.length; index += 1) {
+    if (signal.aborted) throw new Error("补全任务已取消");
+    const target = targets[index];
+    progress(
+      15 + Math.round(((index + 1) / targets.length) * 75),
+      `正在补全岗位详情 ${index + 1}/${targets.length}`,
+    );
+    try {
+      const link = new URL(target.candidate.link);
+      const securityId = link.searchParams.get("securityId") || "";
+      const lid = link.searchParams.get("lid") || "";
+      if (!securityId || !lid) {
+        throw new Error("岗位链接缺少 securityId/lid，需要重新采集该岗位");
+      }
+      const data = await fetchBossDetail(page, headers, {
+        securityId,
+        lid,
+      });
+      const jobInfo = asRecord(asRecord(data.zpData).jobInfo);
+      const bossInfo = asRecord(asRecord(data.zpData).bossInfo);
+      const description = stripHtml(jobInfo.postDescription);
+      if (!description) {
+        throw new Error("BOSS 详情接口没有返回岗位描述");
+      }
+      const detailSkills = asArray(jobInfo.showSkills)
+        .map(asString)
+        .filter(Boolean);
+      const candidate = enrichBossCandidate({
+        ...target.candidate,
+        title: asString(jobInfo.jobName) || target.candidate.title,
+        salary: asString(jobInfo.salaryDesc) || target.candidate.salary,
+        city: asString(jobInfo.locationName) || target.candidate.city,
+        experience:
+          asString(jobInfo.experienceName) ||
+          target.candidate.experience,
+        degree:
+          asString(jobInfo.degreeName) || target.candidate.degree,
+        skills: detailSkills.length
+          ? detailSkills
+          : target.candidate.skills,
+        company:
+          asString(bossInfo.brandName) || target.candidate.company,
+        description,
+        collectedAt: new Date().toISOString(),
+      });
+      details.push({
+        targetKey: target.targetKey,
+        candidateSourceKey: target.candidateSourceKey,
+        jobId: target.jobId,
+        success: true,
+        candidate,
+        error: "",
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : String(error);
+      if (
+        RISK_PATTERN.test(message) ||
+        LOGIN_PATTERN.test(message) ||
+        message.includes("登录状态无效") ||
+        message.includes("访问频繁")
+      ) {
+        throw new BossStopError(message);
+      }
+      details.push({
+        targetKey: target.targetKey,
+        candidateSourceKey: target.candidateSourceKey,
+        jobId: target.jobId,
+        success: false,
+        candidate: null,
+        error: message.slice(0, 2_000),
+      });
+      warnings.push(
+        `${target.candidate.company} / ${target.candidate.title}：${message}`,
+      );
+    }
+    await sleep(Math.max(3_500, requestDelayMs), signal);
+  }
+  progress(95, `详情补全完成，共处理 ${targets.length} 个岗位`);
+  return { details, warnings };
 }
 
 export const bossCollectorConfig = {

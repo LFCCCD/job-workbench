@@ -1,9 +1,11 @@
 import {
   collectBossCandidates,
+  collectBossDetailBackfill,
   BossStopError,
 } from "./boss-collector";
 import {
   CollectorWorkerStartSchema,
+  DetailBackfillStartSchema,
   type CollectorWorkerMessage,
 } from "./collector-protocol";
 
@@ -30,6 +32,24 @@ function send(message: CollectorWorkerMessage) {
 }
 
 async function run(rawMessage: unknown) {
+  if (
+    rawMessage &&
+    typeof rawMessage === "object" &&
+    "type" in rawMessage &&
+    rawMessage.type === "backfill"
+  ) {
+    const start = DetailBackfillStartSchema.parse(rawMessage);
+    const result = await collectBossDetailBackfill({
+      targets: start.targets,
+      requestDelayMs: start.requestDelayMs,
+      signal: abortController.signal,
+      progress: (progress, message) => {
+        send({ type: "progress", progress, message });
+      },
+    });
+    send({ type: "backfill-result", ...result });
+    return;
+  }
   const start = CollectorWorkerStartSchema.parse(rawMessage);
   const result = await collectBossCandidates({
     request: start.request,

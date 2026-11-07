@@ -91,12 +91,19 @@ export const CollectorCitySchema = z.object({
   code: z.number().int().positive(),
 });
 
+export const CollectorCitiesSchema = z
+  .array(CollectorCitySchema)
+  .min(1)
+  .max(20);
+
+export const CollectorQueriesSchema = z
+  .array(z.string().trim().min(1).max(100))
+  .min(1)
+  .max(8);
+
 export const CollectorRequestSchema = z.object({
   cities: z.array(CollectorCitySchema).min(1).max(8),
-  queries: z
-    .array(z.string().trim().min(1).max(100))
-    .min(1)
-    .max(8),
+  queries: CollectorQueriesSchema,
   pagesPerQuery: z.number().int().min(1).max(3).default(1),
   maxSearchRequests: z.number().int().min(1).max(12).default(6),
   detailLimit: z.number().int().min(0).max(30).default(12),
@@ -134,6 +141,19 @@ export const CollectorCacheEntrySchema = z.object({
 
 export const CollectorIdsSchema = z.object({
   ids: z.array(z.string().min(1).max(500)).min(1).max(500),
+});
+
+export const DetailBackfillRequestSchema = z.object({
+  scope: z.enum(["all", "candidates", "jobs"]).default("all"),
+  batchSize: z.number().int().min(1).max(30).default(12),
+  requestDelayMs: z.number().int().min(3_500).max(15_000).default(4_500),
+});
+
+export const DetailBackfillTargetSchema = z.object({
+  targetKey: z.string().min(1).max(600),
+  candidateSourceKey: z.string().max(500).nullable().default(null),
+  jobId: z.string().max(500).nullable().default(null),
+  candidate: CollectorCandidateSchema,
 });
 
 export const AiProviderKindSchema = z.enum([
@@ -425,15 +445,33 @@ export const AutoLaunchSettingSchema = z.object({
   enabled: z.boolean(),
 });
 
+export const accentThemes = [
+  "teal",
+  "blue",
+  "violet",
+  "amber",
+  "rose",
+] as const;
+
+export const AccentThemeSchema = z.enum(accentThemes);
+
 export type JobStatus = z.infer<typeof JobStatusSchema>;
 export type ManualJobInput = z.infer<typeof ManualJobSchema>;
 export type MigrationResult = z.infer<typeof MigrationResultSchema>;
 export type MigrationPreview = z.infer<typeof MigrationPreviewSchema>;
 export type JobFilters = z.infer<typeof ListJobsSchema>;
 export type CollectorCity = z.infer<typeof CollectorCitySchema>;
+export type CollectorCities = z.infer<typeof CollectorCitiesSchema>;
+export type CollectorQueries = z.infer<typeof CollectorQueriesSchema>;
 export type CollectorRequest = z.infer<typeof CollectorRequestSchema>;
 export type CollectorCandidate = z.infer<typeof CollectorCandidateSchema>;
 export type CollectorCacheEntry = z.infer<typeof CollectorCacheEntrySchema>;
+export type DetailBackfillRequest = z.infer<
+  typeof DetailBackfillRequestSchema
+>;
+export type DetailBackfillTarget = z.infer<
+  typeof DetailBackfillTargetSchema
+>;
 export type AiProviderKind = z.infer<typeof AiProviderKindSchema>;
 export type AiEvidence = z.infer<typeof AiEvidenceSchema>;
 export type AiAnalysisResult = z.infer<typeof AiAnalysisResultSchema>;
@@ -453,6 +491,7 @@ export type FollowUpStatus = (typeof followUpStatuses)[number];
 export type FollowUpFields = z.infer<typeof SaveFollowUpSchema>["fields"];
 export type InterviewMode = (typeof interviewModes)[number];
 export type InterviewFields = z.infer<typeof SaveInterviewSchema>["fields"];
+export type AccentTheme = z.infer<typeof AccentThemeSchema>;
 
 export interface JobRecord {
   id: string;
@@ -548,6 +587,24 @@ export interface CollectorStatus {
   edgeRunning: boolean;
   profilePath: string;
   endpoint: string;
+}
+
+export interface DetailBackfillPreview {
+  candidatesMissing: number;
+  jobsMissing: number;
+  totalUniqueMissing: number;
+}
+
+export interface BossCityCatalogGroup {
+  firstChar: string;
+  cities: CollectorCity[];
+}
+
+export interface BossCityCatalog {
+  hotCities: CollectorCity[];
+  groups: BossCityCatalogGroup[];
+  source: "network" | "cache" | "fallback";
+  updatedAt: string;
 }
 
 export interface AiResumeFactInput {
@@ -804,6 +861,10 @@ export interface ReminderCheckResult {
   suppressed: boolean;
 }
 
+export interface UiPreferences {
+  accentTheme: AccentTheme;
+}
+
 export type TaskStatus =
   | "queued"
   | "running"
@@ -849,11 +910,18 @@ export interface JobWorkbenchApi {
   listTasks(): Promise<TaskRecord[]>;
   createBackupTask(): Promise<TaskRecord>;
   createCollectorTask(request: CollectorRequest): Promise<TaskRecord>;
+  getCollectorCities(): Promise<CollectorCities>;
+  saveCollectorCities(cities: CollectorCities): Promise<CollectorCities>;
+  getBossCityCatalog(force?: boolean): Promise<BossCityCatalog>;
+  getCollectorQueries(): Promise<CollectorQueries>;
+  saveCollectorQueries(queries: CollectorQueries): Promise<CollectorQueries>;
   getCollectorStatus(): Promise<CollectorStatus>;
   openCollectorBrowser(): Promise<CollectorStatus>;
   listCollectorPreview(): Promise<CollectorPreviewData>;
   importCollectorCandidates(ids: string[]): Promise<CollectorImportResult>;
   dismissCollectorCandidates(ids: string[]): Promise<OperationResult>;
+  getDetailBackfillPreview(scope?: DetailBackfillRequest["scope"]): Promise<DetailBackfillPreview>;
+  createDetailBackfillTask(request: DetailBackfillRequest): Promise<TaskRecord>;
   getAiSettings(): Promise<AiSettingsView>;
   saveAiSettings(input: AiSettingsInput): Promise<AiSettingsView>;
   clearAiApiKey(): Promise<OperationResult>;
@@ -907,6 +975,8 @@ export interface JobWorkbenchApi {
   setAutoLaunchEnabled(enabled: boolean): Promise<OperationResult>;
   checkForUpdates(force?: boolean): Promise<UpdateInfo>;
   setUpdateAutoCheck(enabled: boolean): Promise<OperationResult>;
+  getUiPreferences(): Promise<UiPreferences>;
+  setAccentTheme(accentTheme: AccentTheme): Promise<UiPreferences>;
   cancelTask(id: string): Promise<TaskRecord>;
   retryTask(id: string): Promise<TaskRecord>;
   clearFinishedTasks(): Promise<OperationResult>;

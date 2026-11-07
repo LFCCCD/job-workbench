@@ -287,6 +287,99 @@ describe("JobDatabase", () => {
     }
   });
 
+  it("selects missing descriptions and applies backfilled job details", () => {
+    const root = createRoot();
+    const database = new JobDatabase(root);
+    try {
+      const job = database.addJob({
+        title: "技术支持工程师",
+        company: "补全测试公司",
+        salary: "7-9K",
+        city: "杭州",
+        link: "https://www.zhipin.com/job_detail/job-only.html?securityId=a&lid=b",
+        description: "",
+      });
+      const candidate = {
+        sourceKey: "boss:candidate-only",
+        title: "实施工程师",
+        company: "候选补全公司",
+        salary: "7-10K",
+        city: "宁波",
+        district: "",
+        experience: "经验不限",
+        degree: "本科",
+        industry: "企业服务",
+        companyScale: "",
+        skills: ["SQL"],
+        category: "软件实施",
+        score: 60,
+        reason: "岗位方向匹配",
+        risks: ["尚未读取到完整岗位描述"],
+        description: "",
+        greeting: "",
+        link: "https://www.zhipin.com/job_detail/candidate-only.html?securityId=c&lid=d",
+        sourceQueries: ["软件实施工程师"],
+        collectedAt: new Date().toISOString(),
+      };
+      database.stageCollectorCandidates("backfill-task", [candidate]);
+      database.saveCollectorCache([
+        {
+          key: "cache-to-invalidate",
+          candidates: [candidate],
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      ]);
+      expect(database.getDetailBackfillPreview("all")).toMatchObject({
+        candidatesMissing: 1,
+        jobsMissing: 1,
+        totalUniqueMissing: 2,
+      });
+      const targets = database.getDetailBackfillTargets("all", 12);
+      expect(targets).toHaveLength(2);
+      const candidateTarget = targets.find(
+        (target) => target.candidateSourceKey === candidate.sourceKey,
+      )!;
+      const jobTarget = targets.find((target) => target.jobId === job.id)!;
+      const applied = database.applyDetailBackfillResults([
+        {
+          targetKey: candidateTarget.targetKey,
+          candidateSourceKey: candidateTarget.candidateSourceKey,
+          jobId: candidateTarget.jobId,
+          success: true,
+          candidate: {
+            ...candidateTarget.candidate,
+            description: "负责系统实施和客户培训。",
+            risks: [],
+            score: 75,
+          },
+        },
+        {
+          targetKey: jobTarget.targetKey,
+          candidateSourceKey: jobTarget.candidateSourceKey,
+          jobId: jobTarget.jobId,
+          success: true,
+          candidate: {
+            ...jobTarget.candidate,
+            description: "负责客户技术支持和问题排查。",
+            risks: [],
+            score: 72,
+          },
+        },
+      ]);
+      expect(applied).toEqual({ updatedCandidates: 1, updatedJobs: 1 });
+      expect(database.getCollectorPreview().candidates[0].candidate.description).toBe(
+        "负责系统实施和客户培训。",
+      );
+      expect(database.getJob(job.id)?.description).toBe(
+        "负责客户技术支持和问题排查。",
+      );
+      expect(database.getCollectorCache()).toHaveLength(0);
+      expect(database.getDetailBackfillPreview("all").totalUniqueMissing).toBe(0);
+    } finally {
+      database.close();
+    }
+  });
+
   it("stores AI analysis results and reuses them by cache key", () => {
     const root = createRoot();
     const database = new JobDatabase(root);

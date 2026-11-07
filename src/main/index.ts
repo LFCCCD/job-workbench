@@ -13,8 +13,12 @@ import { JobDatabase } from "./database";
 import { TaskService } from "./task-service";
 import { AiAnalysisService } from "./ai-service";
 import { AiSettingsService } from "./ai-settings";
-import { CollectorBrowserService } from "./collector-browser";
+import {
+  CollectorBrowserService,
+  isBossSiteUrl,
+} from "./collector-browser";
 import { CollectorService } from "./collector-service";
+import { DetailBackfillService } from "./detail-backfill-service";
 import { renderResumeHtml } from "./resume-render";
 import { AppLogger } from "./app-logger";
 import { HealthService } from "./health-service";
@@ -22,16 +26,21 @@ import { ReminderService } from "./reminder-service";
 import { createTrayImage } from "./tray-icon";
 import { AutoLaunchService } from "./auto-launch-service";
 import { UpdateService } from "./update-service";
+import { CityCatalogService } from "./city-catalog-service";
 import {
+  AccentThemeSchema,
   AiAnalysisIdSchema,
   AiAnalyzeRequestSchema,
   AiSettingsInputSchema,
   ArchiveJobsSchema,
   AutoLaunchSettingSchema,
+  CollectorCitiesSchema,
   CollectorIdsSchema,
+  CollectorQueriesSchema,
   CollectorRequestSchema,
   CrmDeleteSchema,
   CrmJobIdSchema,
+  DetailBackfillRequestSchema,
   JobStatusSchema,
   ListJobsSchema,
   ManualJobSchema,
@@ -79,8 +88,20 @@ let reminderTimer: NodeJS.Timeout | null = null;
 let updateTimer: NodeJS.Timeout | null = null;
 let autoLaunchService: AutoLaunchService | null = null;
 let updateService: UpdateService | null = null;
+let cityCatalogService: CityCatalogService | null = null;
 let isQuitting = false;
 let pendingMigration: MigrationPreview | null = null;
+
+const defaultCollectorCities = [
+  { name: "杭州", code: 101210100 },
+  { name: "宁波", code: 101210400 },
+  { name: "嘉兴", code: 101210300 },
+  { name: "丽水", code: 101210800 },
+];
+const defaultCollectorQueries = [
+  "软件实施工程师",
+  "技术支持工程师",
+];
 
 function getDatabase(): JobDatabase {
   if (!database) {
@@ -101,7 +122,15 @@ function getTaskService(): TaskService {
       settings,
       path.join(currentDir, "ai-worker.js"),
     );
-    taskService = new TaskService(getDatabase(), collector, ai);
+    const detailBackfill = new DetailBackfillService(
+      path.join(currentDir, "collector-worker.js"),
+    );
+    taskService = new TaskService(
+      getDatabase(),
+      collector,
+      ai,
+      detailBackfill,
+    );
   }
   return taskService;
 }
@@ -109,6 +138,33 @@ function getTaskService(): TaskService {
 function getCollectorBrowser(): CollectorBrowserService {
   collectorBrowser ||= new CollectorBrowserService(app.getPath("userData"));
   return collectorBrowser;
+}
+
+function getCollectorCities() {
+  const stored = getDatabase().getAppSetting("collector.cities");
+  if (!stored) return defaultCollectorCities;
+  try {
+    const parsed = CollectorCitiesSchema.safeParse(JSON.parse(stored));
+    return parsed.success ? parsed.data : defaultCollectorCities;
+  } catch {
+    return defaultCollectorCities;
+  }
+}
+
+function getCollectorQueries() {
+  const stored = getDatabase().getAppSetting("collector.queries");
+  if (!stored) return defaultCollectorQueries;
+  try {
+    const parsed = CollectorQueriesSchema.safeParse(JSON.parse(stored));
+    return parsed.success ? parsed.data : defaultCollectorQueries;
+  } catch {
+    return defaultCollectorQueries;
+  }
+}
+
+function getCityCatalogService(): CityCatalogService {
+  cityCatalogService ||= new CityCatalogService(getDatabase());
+  return cityCatalogService;
 }
 
 function getAiSettingsService(): AiSettingsService {
@@ -263,7 +319,16 @@ function createWindow() {
     mainWindow = null;
   });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
+    if (isBossSiteUrl(url)) {
+      void getCollectorBrowser().openBossUrl(url).catch((error) => {
+        getAppLogger().log(
+          "warn",
+          `boss.open_in_dedicated_edge_failed ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    } else if (/^https?:\/\//i.test(url)) {
+      void shell.openExternal(url);
+    }
     return { action: "deny" };
   });
   mainWindow.webContents.on("will-navigate", (event, url) => {
@@ -340,6 +405,31 @@ function registerIpc() {
     const request = CollectorRequestSchema.parse(input);
     return getTaskService().enqueue("collector", request);
   });
+  ipcMain.handle("workbench:collector-cities", () => {
+    return getCollectorCities();
+  });
+  ipcMain.handle("workbench:collector-queries", () => {
+    return getCollectorQueries();
+  });
+  ipcMain.handle("workbench:save-collector-queries", (_event, input) => {
+    const queries = CollectorQueriesSchema.parse(input);
+    getDatabase().setAppSetting(
+      "collector.queries",
+      JSON.stringify(queries),
+    );
+    return queries;
+  });
+  ipcMain.handle("workbench:save-collector-cities", (_event, input) => {
+    const cities = CollectorCitiesSchema.parse(input);
+    getDatabase().setAppSetting(
+      "collector.cities",
+      JSON.stringify(cities),
+    );
+    return cities;
+  });
+  ipcMain.handle("workbench:boss-city-catalog", (_event, force) => {
+    return getCityCatalogService().get(Boolean(force));
+  });
   ipcMain.handle("workbench:collector-status", () => {
     return getCollectorBrowser().status();
   });
@@ -357,6 +447,15 @@ function registerIpc() {
     const { ids } = CollectorIdsSchema.parse(input);
     const count = getDatabase().dismissCollectorCandidates(ids);
     return { ok: true, message: `已移除 ${count} 个候选岗位` };
+  });
+  ipcMain.handle("workbench:detail-backfill-preview", (_event, scope) => {
+    const parsedScope =
+      scope === "candidates" || scope === "jobs" ? scope : "all";
+    return getDatabase().getDetailBackfillPreview(parsedScope);
+  });
+  ipcMain.handle("workbench:create-detail-backfill-task", (_event, input) => {
+    const request = DetailBackfillRequestSchema.parse(input);
+    return getTaskService().enqueue("detail-backfill", request);
   });
   ipcMain.handle("workbench:ai-settings", () => {
     return getAiSettingsService().getView();
@@ -604,6 +703,18 @@ function registerIpc() {
       ok: true,
       message: enabled ? "自动检查更新已开启" : "自动检查更新已关闭",
     };
+  });
+  ipcMain.handle("workbench:ui-preferences", () => {
+    const stored = getDatabase().getAppSetting("ui.accentTheme");
+    const parsed = AccentThemeSchema.safeParse(stored);
+    return {
+      accentTheme: parsed.success ? parsed.data : "teal",
+    };
+  });
+  ipcMain.handle("workbench:set-accent-theme", (_event, input) => {
+    const accentTheme = AccentThemeSchema.parse(input?.accentTheme);
+    getDatabase().setAppSetting("ui.accentTheme", accentTheme);
+    return { accentTheme };
   });
   ipcMain.handle("workbench:cancel-task", (_event, id) => {
     return getTaskService().cancel(String(id));

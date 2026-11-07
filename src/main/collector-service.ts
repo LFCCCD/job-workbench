@@ -79,6 +79,12 @@ export class CollectorService {
           finishWithError(new Error(parsed.data.error));
           return;
         }
+        if (parsed.data.type !== "result") {
+          finishWithError(
+            new Error("Collector Worker 返回了不匹配的采集结果"),
+          );
+          return;
+        }
         try {
           this.database.saveCollectorCache(parsed.data.cacheEntries);
         } catch (error) {
